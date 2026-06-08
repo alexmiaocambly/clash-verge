@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Menginstal layanan Clash Verge memerlukan hak administrator.
   adminUninstallPrompt: Menghapus instalasi layanan Clash Verge memerlukan hak administrator.
 tray:
+  delayTest: Uji latensi
   dashboard: Dasbor
   ruleMode: Mode Aturan
   globalMode: Mode Global
@@ -47,6 +48,7 @@ tray:
   proxies: Proksi
   systemProxy: Proksi Sistem
   tunMode: Mode TUN
+  traySpeed: Tampilkan Kecepatan Jaringan
   closeAllConnections: Tutup Semua Koneksi
   lightweightMode: Mode Ringan
   copyEnv: Salin Variabel Lingkungan

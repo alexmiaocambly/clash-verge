@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: يتطلب تثبيت خدمة Clash Verge صلاحيات المسؤول.
   adminUninstallPrompt: يتطلب إلغاء تثبيت خدمة Clash Verge صلاحيات المسؤول.
 tray:
+  delayTest: اختبار زمن الوصول
   dashboard: لوحة التحكم
   ruleMode: وضع القواعد
   globalMode: الوضع العام
@@ -47,6 +48,7 @@ tray:
   proxies: وكلاء
   systemProxy: وكيل النظام
   tunMode: وضع TUN
+  traySpeed: إظهار سرعة الشبكة
   closeAllConnections: إغلاق كل الاتصالات
   lightweightMode: الوضع الخفيف
   copyEnv: نسخ متغيرات البيئة

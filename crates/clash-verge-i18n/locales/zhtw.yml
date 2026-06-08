@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: 安裝 Clash Verge 服務需要管理員權限
   adminUninstallPrompt: 卸载 Clash Verge 服務需要管理員權限
 tray:
+  delayTest: 延遲測試
   dashboard: 儀表板
   ruleMode: 規則模式
   globalMode: 全域模式
@@ -47,6 +48,7 @@ tray:
   proxies: 代理
   systemProxy: 系統代理
   tunMode: 虛擬網路介面卡模式
+  traySpeed: 顯示即時速率
   closeAllConnections: 關閉所有連線
   lightweightMode: 輕量模式
   copyEnv: 複製環境變數

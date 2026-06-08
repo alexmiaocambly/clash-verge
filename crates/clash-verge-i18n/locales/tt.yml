@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Clash Verge хезмәтен урнаштыру өчен администратор хокуклары кирәк.
   adminUninstallPrompt: Clash Verge хезмәтен бетерү өчен администратор хокуклары кирәк.
 tray:
+  delayTest: Latency Test
   dashboard: Идарә панеле
   ruleMode: Кагыйдә режимы
   globalMode: Глобаль режим
@@ -47,6 +48,7 @@ tray:
   proxies: Проксилар
   systemProxy: Системалы прокси
   tunMode: TUN режимы
+  traySpeed: Show Network Speed
   closeAllConnections: Барлык тоташуларны ябу
   lightweightMode: Җиңел режим
   copyEnv: Мохит үзгәрүчәннәрен күчерү

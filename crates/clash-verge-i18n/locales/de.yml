@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Für die Installation des Clash-Verge-Dienstes sind Administratorrechte erforderlich.
   adminUninstallPrompt: Für die Deinstallation des Clash-Verge-Dienstes sind Administratorrechte erforderlich.
 tray:
+  delayTest: Latenztest
   dashboard: Übersicht
   ruleMode: Regelmodus
   globalMode: Globaler Modus
@@ -47,6 +48,7 @@ tray:
   proxies: Proxy
   systemProxy: Systemproxy
   tunMode: TUN-Modus
+  traySpeed: Netzwerkgeschwindigkeit anzeigen
   closeAllConnections: Alle Verbindungen schließen
   lightweightMode: Leichtmodus
   copyEnv: Umgebungsvariablen kopieren

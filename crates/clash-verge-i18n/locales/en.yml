@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Installing the Clash Verge service requires administrator privileges.
   adminUninstallPrompt: Uninstalling the Clash Verge service requires administrator privileges.
 tray:
+  delayTest: Latency Test
   dashboard: Dashboard
   ruleMode: Rule Mode
   globalMode: Global Mode
@@ -47,6 +48,7 @@ tray:
   proxies: Proxies
   systemProxy: System Proxy
   tunMode: TUN Mode
+  traySpeed: Show Network Speed
   closeAllConnections: Close All Connections
   lightweightMode: Lightweight Mode
   copyEnv: Copy Environment Variables

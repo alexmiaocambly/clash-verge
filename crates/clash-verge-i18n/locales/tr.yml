@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Clash Verge hizmetini kurmak için yönetici ayrıcalıkları gerekir.
   adminUninstallPrompt: Clash Verge hizmetini kaldırmak için yönetici ayrıcalıkları gerekir.
 tray:
+  delayTest: Gecikme testi
   dashboard: Gösterge Paneli
   ruleMode: Kural Modu
   globalMode: Küresel Mod
@@ -47,6 +48,7 @@ tray:
   proxies: Vekil'ler
   systemProxy: Sistem Vekil'i
   tunMode: TUN Modu
+  traySpeed: Ağ Hızını Göster
   closeAllConnections: Tüm Bağlantıları Kapat
   lightweightMode: Hafif Mod
   copyEnv: Ortam Değişkenlerini Kopyala

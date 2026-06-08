@@ -1,180 +1,204 @@
-//! macOS 托盘速率富文本渲染模块
+//! macOS 托盘速率显示模块（自绘 NSView 方案，对齐 ClashX）
 //!
-//! 通过 objc2 调用 NSAttributedString 实现托盘速率的富文本显示，
-//! 支持等宽字体、自适应深色/浅色模式配色、两行定宽布局。
+//! AppKit 在「button.image + attributedTitle」结构下无法控制图标与文字的间距，
+//! 因此改用 ClashX 同款做法：让按钮不自绘内容（`imagePosition = .imageOverlaps`），
+//! 在按钮上叠加一个自定义 `NSView`，由它自绘「图标 + 两行网速」，间距/对齐用布局常量精确控制。
+//! 该 view 的 `hitTest` 返回 nil 让点击穿透，保留 tray-icon 原有的点击/菜单逻辑。
 
 use std::cell::RefCell;
 
 use crate::utils::speed::format_bytes_per_second;
 use crate::{Type, logging};
-use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::{AnyThread as _, DefinedClass as _, MainThreadMarker, MainThreadOnly as _, define_class, msg_send};
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing as _, NSBaselineOffsetAttributeName, NSColor, NSFont, NSFontAttributeName,
-    NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSMutableParagraphStyle,
-    NSParagraphStyleAttributeName, NSStatusBarButton, NSStatusItem, NSTextAlignment,
+    NSAttributedStringNSStringDrawing as _, NSCellImagePosition, NSColor, NSCompositingOperation, NSFont,
+    NSFontAttributeName, NSFontWeightRegular, NSForegroundColorAttributeName, NSImage, NSLineBreakMode,
+    NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBarButton, NSStatusItem, NSTextAlignment, NSView,
 };
-use objc2_foundation::{NSAttributedString, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
-/// 富文本渲染使用的字号（适配两行在托盘栏的高度）
-const TRAY_FONT_SIZE: f64 = 9.5;
-/// 两行文本的固定行高，避免不同菜单栏高度/缩放下使用系统默认行高导致裁剪
-const TRAY_LINE_HEIGHT: f64 = 10.0;
-/// 两行文本的行间距
-const TRAY_LINE_SPACING: f64 = 0.0;
-/// 两行文本整体行高倍数（用于进一步压缩文本块高度）
-const TRAY_LINE_HEIGHT_MULTIPLE: f64 = 1.00;
-/// 文本块段前偏移（用于将两行文本整体下移）
-const TRAY_PARAGRAPH_SPACING_BEFORE: f64 = 0.0;
-/// 基线基准位移按字体上沿比例生成（避免硬编码常量）
-const TRAY_BASELINE_OFFSET_GLYPH_HEIGHT_RATIO: f64 = 3.0;
-/// Tauri tray-icon 将图标缩放为 18pt；这里额外预留图标、图文间距与系统内边距
-const TRAY_STATUS_ITEM_EXTRA_WIDTH: f64 = 30.0;
-/// 典型 6 字符速率文本的最小宽度，避免 0B/s 等短文本让状态项反复收缩
-const TRAY_STATUS_ITEM_MIN_LENGTH: f64 = 58.0;
-/// AppKit 的 NSVariableStatusItemLength。清空速率标题后恢复系统按图标自适应
+/// 网速字号
+const TRAY_FONT_SIZE: f64 = 9.0;
+/// 图标绘制尺寸
+const TRAY_ICON_SIZE: f64 = 18.0;
+/// 图标左侧留白
+const TRAY_ICON_LEFT: f64 = 1.0;
+/// 图标与网速文字之间的间距（这就是可控的“图标-文字间距”）
+const TRAY_ICON_TEXT_GAP: f64 = 8.0;
+/// 网速文字右侧留白
+const TRAY_TEXT_RIGHT_PAD: f64 = 4.0;
+/// 速率显示时状态项固定宽度（含图标 + 间距 + 文字 + 留白），固定宽度避免图标随文本宽窄跳动
+const TRAY_STATUS_ITEM_FIXED_LENGTH: f64 = 78.0;
+/// AppKit 的 NSVariableStatusItemLength，清除速率显示后恢复按图标自适应
 const NS_VARIABLE_STATUS_ITEM_LENGTH: f64 = -1.0;
 
-thread_local! {
-    static LAST_DISPLAY_STR: RefCell<String> = const { RefCell::new(String::new()) };
-}
-
-/// 将上行/下行速率格式化为两行定宽文本
-///
-/// # Arguments
-/// * `up` - 上行速率（字节/秒）
-/// * `down` - 下行速率（字节/秒）
+/// 将上行/下行速率格式化为两行右对齐文本（上行在上，下行在下）
 fn format_tray_speed(up: u64, down: u64) -> String {
-    // 上行放在第一行，下行放在第二行；通过上下布局表达方向，不再显示箭头字符。
-    let up_str = format_bytes_per_second(up);
-    let down_str = format_bytes_per_second(down);
-    format!("{:>6}\n{:>6}", up_str, down_str)
+    format!("{:>6}\n{:>6}", format_bytes_per_second(up), format_bytes_per_second(down))
 }
 
-fn build_attributes(button_height: f64) -> Retained<NSDictionary<NSString, AnyObject>> {
-    unsafe {
-        // 等宽系统字体，确保数字不跳动
-        let font = NSFont::monospacedSystemFontOfSize_weight(TRAY_FONT_SIZE, NSFontWeightRegular);
-        // 自适应标签颜色（自动跟随深色/浅色模式）
+/// 构建两行网速的富文本（数字等宽字体、自适应标签色、右对齐）
+fn build_speed_attributed(text: &str) -> Retained<NSAttributedString> {
+    let attrs: Retained<NSDictionary<NSString, AnyObject>> = unsafe {
+        let font = NSFont::monospacedDigitSystemFontOfSize_weight(TRAY_FONT_SIZE, NSFontWeightRegular);
         let color = NSColor::labelColor();
-        // 段落样式：右对齐，保证定宽视觉一致
-        let para_style = NSMutableParagraphStyle::new();
-        para_style.setAlignment(NSTextAlignment::Right);
-        para_style.setLineBreakMode(NSLineBreakMode::ByClipping);
-        para_style.setLineSpacing(TRAY_LINE_SPACING);
-        para_style.setLineHeightMultiple(TRAY_LINE_HEIGHT_MULTIPLE);
-        para_style.setMinimumLineHeight(TRAY_LINE_HEIGHT);
-        para_style.setMaximumLineHeight(TRAY_LINE_HEIGHT);
-        para_style.setParagraphSpacingBefore(TRAY_PARAGRAPH_SPACING_BEFORE);
-        let glyph_height = font.ascender() - font.descender();
-        let base_offset = -(glyph_height / TRAY_BASELINE_OFFSET_GLYPH_HEIGHT_RATIO);
-        let free_space = TRAY_LINE_HEIGHT * 2.0 - button_height;
-        let baseline_offset = NSNumber::new_f64(base_offset + free_space / 2.0);
-
-        let keys: &[&NSString] = &[
-            NSFontAttributeName,
-            NSForegroundColorAttributeName,
-            NSParagraphStyleAttributeName,
-            NSBaselineOffsetAttributeName,
-        ];
-        let values: &[&AnyObject] = &[&font, &color, &para_style, &baseline_offset];
+        let para = NSMutableParagraphStyle::new();
+        para.setAlignment(NSTextAlignment::Right);
+        para.setLineBreakMode(NSLineBreakMode::ByClipping);
+        let keys: &[&NSString] = &[NSFontAttributeName, NSForegroundColorAttributeName, NSParagraphStyleAttributeName];
+        let values: &[&AnyObject] = &[&font, &color, &para];
         NSDictionary::from_slices(keys, values)
-    }
-}
-
-/// 创建带属性的富文本
-///
-/// # Arguments
-/// * `text` - 富文本字符串内容
-/// * `attrs` - 可选富文本属性字典（None 表示用默认属性）
-fn create_attributed_string(
-    text: &NSString,
-    attrs: Option<&NSDictionary<NSString, AnyObject>>,
-) -> Retained<NSAttributedString> {
+    };
     unsafe {
-        NSAttributedString::initWithString_attributes(<NSAttributedString as objc2::AnyThread>::alloc(), text, attrs)
+        NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &NSString::from_str(text), Some(&attrs))
     }
 }
 
-fn status_item_length_for_speed(attr_str: &NSAttributedString) -> f64 {
-    (attr_str.size().width.ceil() + TRAY_STATUS_ITEM_EXTRA_WIDTH).max(TRAY_STATUS_ITEM_MIN_LENGTH)
+struct SpeedViewIvars {
+    text: RefCell<String>,
+    icon: RefCell<Option<Retained<NSImage>>>,
 }
 
-fn sync_click_target_frame(button: &NSStatusBarButton) {
-    let bounds = button.bounds();
+define_class!(
+    #[unsafe(super(NSView))]
+    #[name = "ClashVergeSpeedView"]
+    #[ivars = SpeedViewIvars]
+    struct SpeedView;
+
+    impl SpeedView {
+        /// 翻转坐标系，使用左上角原点，便于自上而下布局
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// 自绘：左侧图标（垂直居中）+ 右侧两行网速（右对齐、垂直居中）
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let bounds = self.bounds();
+            let ivars = self.ivars();
+
+            // 图标
+            if let Some(img) = ivars.icon.borrow().as_ref() {
+                let y = (bounds.size.height - TRAY_ICON_SIZE) / 2.0;
+                let rect = NSRect::new(NSPoint::new(TRAY_ICON_LEFT, y), NSSize::new(TRAY_ICON_SIZE, TRAY_ICON_SIZE));
+                img.drawInRect_fromRect_operation_fraction(
+                    rect,
+                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+                    NSCompositingOperation::SourceOver,
+                    1.0,
+                );
+            }
+
+            // 网速文字
+            let text = ivars.text.borrow();
+            if !text.is_empty() {
+                let attr = build_speed_attributed(&text);
+                let text_left = TRAY_ICON_LEFT + TRAY_ICON_SIZE + TRAY_ICON_TEXT_GAP;
+                let text_w = (bounds.size.width - text_left - TRAY_TEXT_RIGHT_PAD).max(0.0);
+                let text_h = attr.size().height;
+                let y = (bounds.size.height - text_h) / 2.0;
+                let rect = NSRect::new(NSPoint::new(text_left, y), NSSize::new(text_w, text_h));
+                attr.drawInRect(rect);
+            }
+        }
+
+        /// 点击穿透：让 tray-icon 的命中视图收到点击，保留原有点击/菜单逻辑
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+    }
+);
+
+impl SpeedView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SpeedViewIvars {
+            text: RefCell::new(String::new()),
+            icon: RefCell::new(None),
+        });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+/// 找到按钮上已存在的 SpeedView，没有则创建并添加
+fn ensure_speed_view(button: &NSStatusBarButton, mtm: MainThreadMarker) -> Retained<SpeedView> {
     let subviews = button.subviews();
+    for i in 0..subviews.count() {
+        if let Ok(view) = subviews.objectAtIndex(i).downcast::<SpeedView>() {
+            return view;
+        }
+    }
+    let view = SpeedView::new(mtm, button.bounds());
+    button.addSubview(&view);
+    view
+}
 
-    for index in 0..subviews.count() {
-        let subview = subviews.objectAtIndex(index);
-        subview.setFrame(bounds);
+/// 移除按钮上的 SpeedView
+fn remove_speed_view(button: &NSStatusBarButton) {
+    let subviews = button.subviews();
+    for i in 0..subviews.count() {
+        if let Ok(view) = subviews.objectAtIndex(i).downcast::<SpeedView>() {
+            view.removeFromSuperview();
+        }
     }
 }
 
-/// 在主线程下设置 NSStatusItem 按钮的标题内容
-///
-/// 依赖 Tauri `with_inner_tray_icon` 保证回调在主线程执行；
-/// 若意外在非主线程调用，`MainThreadMarker::new()` 返回 `None` 并记录警告。
-///
-/// # Arguments
-/// * `status_item` - macOS 托盘 NSStatusItem 引用
-/// * `text` - 标题字符串内容
-/// * `show_speed` - 是否以速率富文本样式绘制；false 时清空为普通空标题
-fn apply_status_item_attributed_title(status_item: &NSStatusItem, text: &NSString, show_speed: bool) {
+/// 以自绘 view 显示速率（图标 + 两行网速）。依赖 `with_inner_tray_icon` 保证主线程调用。
+pub fn set_speed_attributed_title(status_item: &NSStatusItem, up: u64, down: u64) {
     let Some(mtm) = MainThreadMarker::new() else {
-        logging!(warn, Type::Tray, "托盘速率富文本设置跳过：非主线程调用");
+        logging!(warn, Type::Tray, "托盘速率显示跳过：非主线程调用");
         return;
     };
     let Some(button) = status_item.button(mtm) else {
         return;
     };
-    let attr_str = if show_speed {
-        let attrs = build_attributes(button.bounds().size.height);
-        let attrs: &NSDictionary<NSString, AnyObject> = &attrs;
-        let attr_str = create_attributed_string(text, Some(attrs));
-        status_item.setLength(status_item_length_for_speed(&attr_str));
-        attr_str
-    } else {
-        create_attributed_string(text, None)
-    };
-    button.setAttributedTitle(&attr_str);
-    sync_click_target_frame(&button);
+
+    // 让按钮不自绘图标（NoImage：button.image 属性保留供 SpeedView 读取，但按钮自身不绘制，
+    // 避免与 SpeedView 画的图标重复）；由 SpeedView 接管全部绘制；固定状态项宽度
+    button.setImagePosition(NSCellImagePosition::NoImage);
+    status_item.setLength(TRAY_STATUS_ITEM_FIXED_LENGTH);
+
+    let view = ensure_speed_view(&button, mtm);
+    view.setFrame(button.bounds());
+
+    let ivars = view.ivars();
+    *ivars.text.borrow_mut() = format_tray_speed(up, down);
+    // 从按钮当前图标取图，交由 view 绘制（与 tray-icon 的图标切换保持同步）
+    *ivars.icon.borrow_mut() = button.image();
+    view.setNeedsDisplay(true);
 }
 
-/// 将速率以富文本形式设置到 NSStatusItem 的按钮上
-///
-/// # Arguments
-/// * `status_item` - macOS 托盘 NSStatusItem 引用
-/// * `up` - 上行速率（字节/秒）
-/// * `down` - 下行速率（字节/秒）
-pub fn set_speed_attributed_title(status_item: &NSStatusItem, up: u64, down: u64) {
-    let speed_text = format_tray_speed(up, down);
-    let changed = LAST_DISPLAY_STR.with(|last| {
-        let mut last_borrow = last.borrow_mut();
-        if *last_borrow == speed_text {
-            false
-        } else {
-            *last_borrow = speed_text.clone();
-            true
-        }
-    });
-
-    if !changed {
+/// 图标更新后调用：tray-icon 的 set_icon 会把按钮 imagePosition 重设为 ImageLeft（按钮重新自绘图标，
+/// 与 SpeedView 的图标重复成双图标）。这里把它重新设回 NoImage，并把新图标同步给 SpeedView。
+pub fn reassert_speed_icon(status_item: &NSStatusItem) {
+    let Some(mtm) = MainThreadMarker::new() else {
         return;
+    };
+    let Some(button) = status_item.button(mtm) else {
+        return;
+    };
+    button.setImagePosition(NSCellImagePosition::NoImage);
+    let subviews = button.subviews();
+    for i in 0..subviews.count() {
+        if let Ok(view) = subviews.objectAtIndex(i).downcast::<SpeedView>() {
+            *view.ivars().icon.borrow_mut() = button.image();
+            view.setNeedsDisplay(true);
+        }
     }
-    let ns_string = NSString::from_str(&speed_text);
-    apply_status_item_attributed_title(status_item, &ns_string, true);
 }
 
-/// 清除 NSStatusItem 按钮上的富文本速率显示
-///
-/// # Arguments
-/// * `status_item` - macOS 托盘 NSStatusItem 引用
+/// 清除速率显示，恢复按钮自绘图标
 pub fn clear_speed_attributed_title(status_item: &NSStatusItem) {
-    LAST_DISPLAY_STR.with(|last| {
-        last.borrow_mut().clear();
-    });
-    let empty = NSString::from_str("");
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(button) = status_item.button(mtm) else {
+        return;
+    };
+    remove_speed_view(&button);
+    button.setImagePosition(NSCellImagePosition::ImageLeft);
     status_item.setLength(NS_VARIABLE_STATUS_ITEM_LENGTH);
-    apply_status_item_attributed_title(status_item, &empty, false);
 }

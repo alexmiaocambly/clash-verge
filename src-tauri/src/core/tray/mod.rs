@@ -31,6 +31,8 @@ use tauri::{
 
 mod menu_def;
 #[cfg(target_os = "macos")]
+mod native_menu;
+#[cfg(target_os = "macos")]
 mod speed_task;
 use menu_def::{MenuIds, MenuTexts};
 
@@ -46,6 +48,11 @@ pub const TRAY_ID: &str = "clash-verge-rev-tray";
 const DEFAULT_TRAY_EVENT: &str = "tray_menu";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const DEFAULT_TRAY_EVENT: &str = "main_window";
+
+/// macOS 原生托盘菜单上次成功获取的代理数据缓存。
+/// `get_proxies()` 偶发超时/失败时复用它，避免代理组在菜单里随机消失。
+#[cfg(target_os = "macos")]
+static LAST_PROXIES: parking_lot::Mutex<Option<std::sync::Arc<Proxies>>> = parking_lot::Mutex::new(None);
 
 #[derive(Clone)]
 struct TrayState {}
@@ -221,6 +228,81 @@ impl Tray {
         let profiles_preview = profiles_arc.profiles_preview().unwrap_or_default();
         let is_lightweight_mode = is_in_lightweight_mode();
 
+        #[cfg(target_os = "macos")]
+        {
+            // 在 profiles_preview 被 muda 菜单消费前，提取原生菜单所需的 owned 数据
+            let native_profiles: Vec<native_menu::ProfileEntry> = profiles_preview
+                .iter()
+                .map(|p| native_menu::ProfileEntry {
+                    uid: p.uid.to_string(),
+                    name: p.name.to_string(),
+                    is_current: p.is_current,
+                })
+                .collect();
+            let native_proxies = match tokio::time::timeout(
+                Duration::from_millis(3000),
+                handle::Handle::mihomo().await.get_proxies(),
+            )
+            .await
+            {
+                Ok(Ok(p)) => {
+                    let arc = std::sync::Arc::new(p);
+                    *LAST_PROXIES.lock() = Some(std::sync::Arc::clone(&arc));
+                    Some(arc)
+                }
+                // 超时或失败：复用上次成功的代理数据，避免代理组消失（下次成功即刷新）
+                _ => LAST_PROXIES.lock().clone(),
+            };
+            let native_proxy_order: Option<std::collections::HashMap<std::string::String, usize>> =
+                cmd::get_runtime_config().await.ok().flatten().and_then(|config| {
+                    config
+                        .get("proxy-groups")
+                        .and_then(|groups| groups.as_sequence())
+                        .map(|groups| {
+                            groups
+                                .iter()
+                                .filter_map(|g| g.get("name"))
+                                .filter_map(|n| n.as_str())
+                                .enumerate()
+                                .map(|(i, name)| (name.to_string(), i))
+                                .collect()
+                        })
+                });
+
+            // tray-icon 的左键弹出依赖其内部持有的 muda 菜单非空（据此触发 performClick），
+            // 因此 macOS 仍构建 muda 菜单作为“点击触发器”，随后用原生 NSMenu 覆盖
+            // NSStatusItem.menu 作为实际显示内容（原生菜单后续支持自定义 NSView 节点行）。
+            logging_error!(
+                Type::Tray,
+                tray.set_menu(Some(
+                    create_tray_menu(
+                        app_handle,
+                        Some(mode.as_str()),
+                        *system_proxy,
+                        *tun_mode,
+                        tun_mode_available,
+                        profiles_preview,
+                        is_lightweight_mode,
+                    )
+                    .await?,
+                ))
+            );
+            native_menu::refresh(
+                &tray,
+                native_menu::NativeMenuData {
+                    mode: mode.clone(),
+                    system_proxy: *system_proxy,
+                    tun_mode: *tun_mode,
+                    tun_available: tun_mode_available,
+                    tray_speed: verge.enable_tray_speed.unwrap_or(false),
+                    lightweight: is_lightweight_mode,
+                    profiles: native_profiles,
+                    proxies: native_proxies,
+                    proxy_order: native_proxy_order,
+                },
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
         logging_error!(
             Type::Tray,
             tray.set_menu(Some(
@@ -266,6 +348,15 @@ impl Tray {
         {
             let is_colorful = verge.tray_icon.as_deref().unwrap_or("monochrome") == "colorful";
             logging_error!(Type::Tray, tray.set_icon_as_template(!is_colorful));
+            // 速率模式下，set_icon 会把按钮 imagePosition 重设为 ImageLeft，导致按钮重新自绘图标、
+            // 与 SpeedView 的图标重复闪烁。这里紧接着重新设回 NoImage 并把新图标同步给 SpeedView。
+            if verge.enable_tray_speed.unwrap_or(false) {
+                let _ = tray.with_inner_tray_icon(|inner| {
+                    if let Some(si) = inner.ns_status_item() {
+                        crate::utils::tray_speed::reassert_speed_icon(&si);
+                    }
+                });
+            }
         }
 
         Ok(())
@@ -371,8 +462,7 @@ impl Tray {
         let builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let show_menu_on_left_click =
-            verge.tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT) == "tray_menu";
+        let show_menu_on_left_click = verge.tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT) == "tray_menu";
 
         #[cfg(not(target_os = "linux"))]
         let mut builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
@@ -459,6 +549,7 @@ fn create_subcreate_proxy_menu_item(
     proxy_mode: &str,
     proxy_group_order_map: Option<HashMap<String, usize>>,
     proxy_nodes_data: Option<Proxies>,
+    delay_test_text: &str,
 ) -> Vec<Submenu<Wry>> {
     let proxy_submenus: Vec<Submenu<Wry>> = {
         let mut submenus: Vec<(String, usize, Submenu<Wry>)> = Vec::new();
@@ -515,8 +606,22 @@ fn create_subcreate_proxy_menu_item(
 
                 let group_display_name = group_name.to_string();
 
-                let group_items_refs: Vec<&dyn IsMenuItem<Wry>> =
-                    group_items.iter().map(|item| item as &dyn IsMenuItem<Wry>).collect();
+                // 在节点列表最上面插入「延迟测试」项，点击后对该组所有节点测速
+                let delay_item = MenuItem::with_id(
+                    app_handle,
+                    format!("delay_group_{group_name}"),
+                    delay_test_text,
+                    true,
+                    None::<&str>,
+                )
+                .map_err(|e| logging!(warn, Type::Tray, "Failed to create delay test item: {}", e))
+                .ok();
+
+                let mut group_items_refs: Vec<&dyn IsMenuItem<Wry>> = Vec::with_capacity(group_items.len() + 1);
+                if let Some(item) = delay_item.as_ref() {
+                    group_items_refs.push(item as &dyn IsMenuItem<Wry>);
+                }
+                group_items_refs.extend(group_items.iter().map(|item| item as &dyn IsMenuItem<Wry>));
 
                 if let Ok(submenu) = Submenu::with_id_and_items(
                     app_handle,
@@ -726,8 +831,13 @@ async fn create_tray_menu(
         &profile_menu_items_refs,
     )?;
 
-    let proxy_sub_menus =
-        create_subcreate_proxy_menu_item(app_handle, current_proxy_mode, proxy_group_order_map, proxy_nodes_data);
+    let proxy_sub_menus = create_subcreate_proxy_menu_item(
+        app_handle,
+        current_proxy_mode,
+        proxy_group_order_map,
+        proxy_nodes_data,
+        &texts.delay_test,
+    );
 
     let (proxies_menu, inline_proxy_items) = match tray_proxy_groups_display_mode {
         "default" => create_proxy_menu_item(app_handle, false, proxy_sub_menus, &texts.proxies)?,
@@ -928,7 +1038,15 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
         return;
     }
     AsyncHandler::spawn(|| async move {
-        match event.id.as_ref() {
+        dispatch_menu_id(event.id.as_ref()).await;
+    });
+}
+
+/// 菜单项 id → 行为分发。muda 托盘菜单与 macOS 原生菜单共用同一套分发逻辑。
+// 一个菜单项一个分支的大 match，认知复杂度高属正常，无需拆分。
+#[allow(clippy::cognitive_complexity)]
+pub(crate) async fn dispatch_menu_id(id: &str) {
+        match id {
             mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
                 // Removing the the "tray_" prefix and "_mode" suffix
                 if let Some(stripped) = mode.strip_prefix("tray_")
@@ -949,6 +1067,16 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
             }
             MenuIds::TUN_MODE => {
                 feat::toggle_tun_mode(None).await;
+            }
+            MenuIds::TRAY_SPEED => {
+                let cur = Config::verge().await.latest_arc().enable_tray_speed.unwrap_or(false);
+                let patch = IVerge {
+                    enable_tray_speed: Some(!cur),
+                    ..Default::default()
+                };
+                logging_error!(Type::Tray, feat::patch_verge(&patch, false).await);
+                // patch_verge 对 enable_tray_speed 只刷新图标/速率任务，不刷新菜单，这里手动刷新勾选态
+                logging_error!(Type::Tray, Tray::global().update_menu().await);
             }
             MenuIds::CLOSE_ALL_CONNECTIONS => {
                 if let Err(err) = handle::Handle::mihomo().await.close_all_connections().await {
@@ -990,6 +1118,31 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 };
                 feat::toggle_proxy_profile(profile_index.into()).await;
             }
+            id if id.starts_with("delay_group_") => {
+                let Some(group_name) = id.strip_prefix("delay_group_") else {
+                    return;
+                };
+                let group_name = group_name.to_string();
+                let verge = Config::verge().await.latest_arc();
+                let test_url = verge
+                    .default_latency_test
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("http://cp.cloudflare.com/generate_204")
+                    .to_string();
+                let timeout = verge.default_latency_timeout.filter(|t| *t > 0).unwrap_or(10000) as u32;
+                logging!(info, Type::Tray, "托盘菜单点击: 延迟测试 {}", group_name);
+                match handle::Handle::mihomo().await.delay_group(&group_name, &test_url, timeout).await {
+                    Ok(_) => {
+                        // 测速完成后刷新托盘菜单，重新打开菜单即可看到更新后的延迟
+                        logging_error!(Type::Tray, Tray::global().update_menu().await);
+                    }
+                    Err(e) => {
+                        logging!(warn, Type::Tray, "延迟测试失败 {}: {}", group_name, e);
+                    }
+                }
+            }
             id if id.starts_with("proxy_") => {
                 // proxy_{group_name}_{proxy_name}
                 let rest = match id.strip_prefix("proxy_") {
@@ -1003,11 +1156,7 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
                 feat::switch_proxy_node(group_name, proxy_name).await;
             }
             _ => {
-                logging!(debug, Type::Tray, "Unhandled tray menu event: {:?}", event.id);
+                logging!(debug, Type::Tray, "Unhandled tray menu event: {}", id);
             }
         }
-
-        // We dont expected to refresh tray state here
-        // as the inner handle function (SHOULD) already takes care of it
-    });
 }

@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Для установки службы Clash Verge требуются права администратора.
   adminUninstallPrompt: Для удаления службы Clash Verge требуются права администратора.
 tray:
+  delayTest: Тест задержки
   dashboard: Панель
   ruleMode: Режим правил
   globalMode: Глобальный режим
@@ -47,6 +48,7 @@ tray:
   proxies: Прокси
   systemProxy: Системный прокси
   tunMode: Режим TUN
+  traySpeed: Показывать скорость сети
   closeAllConnections: Закрыть все соединения
   lightweightMode: Легкий режим
   copyEnv: Копировать переменные среды

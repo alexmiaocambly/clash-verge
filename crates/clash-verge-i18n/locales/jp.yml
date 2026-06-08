@@ -35,6 +35,7 @@ service:
   adminInstallPrompt: Clash Verge サービスのインストールには管理者権限が必要です。
   adminUninstallPrompt: Clash Verge サービスのアンインストールには管理者権限が必要です。
 tray:
+  delayTest: 遅延テスト
   dashboard: ダッシュボード
   ruleMode: ルールモード
   globalMode: グローバルモード
@@ -47,6 +48,7 @@ tray:
   proxies: プロキシ
   systemProxy: システムプロキシ
   tunMode: TUN モード
+  traySpeed: 通信速度を表示
   closeAllConnections: すべての接続を閉じる
   lightweightMode: 軽量モード
   copyEnv: 環境変数をコピー

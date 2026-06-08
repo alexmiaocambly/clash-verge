@@ -18,6 +18,7 @@ macro_rules! define_menu {
             }
         }
 
+        #[allow(dead_code)]
         impl MenuIds {
             $(pub const $const_name: &'static str = $id;)+
         }
@@ -32,8 +33,10 @@ define_menu! {
     outbound_modes => OUTBOUND_MODES, "tray_outbound_modes", "tray.outboundModes",
     profiles => PROFILES, "tray_profiles", "tray.profiles",
     proxies => PROXIES, "tray_proxies", "tray.proxies",
+    delay_test => DELAY_TEST, "tray_delay_test", "tray.delayTest",
     system_proxy => SYSTEM_PROXY, "tray_system_proxy", "tray.systemProxy",
     tun_mode => TUN_MODE, "tray_tun_mode", "tray.tunMode",
+    tray_speed => TRAY_SPEED, "tray_tray_speed", "tray.traySpeed",
     close_all_connections => CLOSE_ALL_CONNECTIONS, "tray_close_all_connections", "tray.closeAllConnections",
     lightweight_mode => LIGHTWEIGHT_MODE, "tray_lightweight_mode", "tray.lightweightMode",
     copy_env => COPY_ENV, "tray_copy_env", "tray.copyEnv",
