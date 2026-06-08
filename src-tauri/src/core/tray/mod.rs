@@ -1046,117 +1046,121 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
 // 一个菜单项一个分支的大 match，认知复杂度高属正常，无需拆分。
 #[allow(clippy::cognitive_complexity)]
 pub(crate) async fn dispatch_menu_id(id: &str) {
-        match id {
-            mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
-                // Removing the the "tray_" prefix and "_mode" suffix
-                if let Some(stripped) = mode.strip_prefix("tray_")
-                    && let Some(final_mode) = stripped.strip_suffix("_mode")
-                {
-                    logging!(info, Type::ProxyMode, "Switch Proxy Mode To: {}", final_mode);
-                    feat::change_clash_mode(final_mode.into()).await;
-                }
-            }
-            MenuIds::DASHBOARD => {
-                logging!(info, Type::Tray, "托盘菜单点击: 打开窗口");
-                if !lightweight::exit_lightweight_mode().await {
-                    WindowManager::show_main_window().await;
-                };
-            }
-            MenuIds::SYSTEM_PROXY => {
-                feat::toggle_system_proxy().await;
-            }
-            MenuIds::TUN_MODE => {
-                feat::toggle_tun_mode(None).await;
-            }
-            MenuIds::TRAY_SPEED => {
-                let cur = Config::verge().await.latest_arc().enable_tray_speed.unwrap_or(false);
-                let patch = IVerge {
-                    enable_tray_speed: Some(!cur),
-                    ..Default::default()
-                };
-                logging_error!(Type::Tray, feat::patch_verge(&patch, false).await);
-                // patch_verge 对 enable_tray_speed 只刷新图标/速率任务，不刷新菜单，这里手动刷新勾选态
-                logging_error!(Type::Tray, Tray::global().update_menu().await);
-            }
-            MenuIds::CLOSE_ALL_CONNECTIONS => {
-                if let Err(err) = handle::Handle::mihomo().await.close_all_connections().await {
-                    logging!(error, Type::Tray, "Failed to close all connections from tray: {err}");
-                }
-            }
-            MenuIds::COPY_ENV => feat::copy_clash_env().await,
-            MenuIds::CONF_DIR => {
-                let _ = cmd::open_app_dir().await;
-            }
-            MenuIds::CORE_DIR => {
-                let _ = cmd::open_core_dir().await;
-            }
-            MenuIds::LOGS_DIR => {
-                let _ = cmd::open_logs_dir().await;
-            }
-            MenuIds::APP_LOG => {
-                let _ = help::open_app_latest_log();
-            }
-            MenuIds::CORE_LOG => {
-                let _ = help::open_core_latest_log();
-            }
-            MenuIds::RESTART_CLASH => feat::restart_clash_core().await,
-            MenuIds::RESTART_APP => feat::restart_app().await,
-            MenuIds::LIGHTWEIGHT_MODE => {
-                if !is_in_lightweight_mode() {
-                    lightweight::entry_lightweight_mode().await;
-                } else {
-                    lightweight::exit_lightweight_mode().await;
-                }
-            }
-            MenuIds::EXIT => {
-                feat::quit().await;
-            }
-            id if id.starts_with("profiles_") => {
-                let profile_index = match id.strip_prefix("profiles_") {
-                    Some(index_str) => index_str,
-                    None => return,
-                };
-                feat::toggle_proxy_profile(profile_index.into()).await;
-            }
-            id if id.starts_with("delay_group_") => {
-                let Some(group_name) = id.strip_prefix("delay_group_") else {
-                    return;
-                };
-                let group_name = group_name.to_string();
-                let verge = Config::verge().await.latest_arc();
-                let test_url = verge
-                    .default_latency_test
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("http://cp.cloudflare.com/generate_204")
-                    .to_string();
-                let timeout = verge.default_latency_timeout.filter(|t| *t > 0).unwrap_or(10000) as u32;
-                logging!(info, Type::Tray, "托盘菜单点击: 延迟测试 {}", group_name);
-                match handle::Handle::mihomo().await.delay_group(&group_name, &test_url, timeout).await {
-                    Ok(_) => {
-                        // 测速完成后刷新托盘菜单，重新打开菜单即可看到更新后的延迟
-                        logging_error!(Type::Tray, Tray::global().update_menu().await);
-                    }
-                    Err(e) => {
-                        logging!(warn, Type::Tray, "延迟测试失败 {}: {}", group_name, e);
-                    }
-                }
-            }
-            id if id.starts_with("proxy_") => {
-                // proxy_{group_name}_{proxy_name}
-                let rest = match id.strip_prefix("proxy_") {
-                    Some(r) => r,
-                    None => return,
-                };
-                let (group_name, proxy_name) = match rest.split_once('_') {
-                    Some((g, p)) => (g, p),
-                    None => return,
-                };
-                feat::switch_proxy_node(group_name, proxy_name).await;
-            }
-            _ => {
-                logging!(debug, Type::Tray, "Unhandled tray menu event: {}", id);
+    match id {
+        mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
+            // Removing the the "tray_" prefix and "_mode" suffix
+            if let Some(stripped) = mode.strip_prefix("tray_")
+                && let Some(final_mode) = stripped.strip_suffix("_mode")
+            {
+                logging!(info, Type::ProxyMode, "Switch Proxy Mode To: {}", final_mode);
+                feat::change_clash_mode(final_mode.into()).await;
             }
         }
+        MenuIds::DASHBOARD => {
+            logging!(info, Type::Tray, "托盘菜单点击: 打开窗口");
+            if !lightweight::exit_lightweight_mode().await {
+                WindowManager::show_main_window().await;
+            };
+        }
+        MenuIds::SYSTEM_PROXY => {
+            feat::toggle_system_proxy().await;
+        }
+        MenuIds::TUN_MODE => {
+            feat::toggle_tun_mode(None).await;
+        }
+        MenuIds::TRAY_SPEED => {
+            let cur = Config::verge().await.latest_arc().enable_tray_speed.unwrap_or(false);
+            let patch = IVerge {
+                enable_tray_speed: Some(!cur),
+                ..Default::default()
+            };
+            logging_error!(Type::Tray, feat::patch_verge(&patch, false).await);
+            // patch_verge 对 enable_tray_speed 只刷新图标/速率任务，不刷新菜单，这里手动刷新勾选态
+            logging_error!(Type::Tray, Tray::global().update_menu().await);
+        }
+        MenuIds::CLOSE_ALL_CONNECTIONS => {
+            if let Err(err) = handle::Handle::mihomo().await.close_all_connections().await {
+                logging!(error, Type::Tray, "Failed to close all connections from tray: {err}");
+            }
+        }
+        MenuIds::COPY_ENV => feat::copy_clash_env().await,
+        MenuIds::CONF_DIR => {
+            let _ = cmd::open_app_dir().await;
+        }
+        MenuIds::CORE_DIR => {
+            let _ = cmd::open_core_dir().await;
+        }
+        MenuIds::LOGS_DIR => {
+            let _ = cmd::open_logs_dir().await;
+        }
+        MenuIds::APP_LOG => {
+            let _ = help::open_app_latest_log();
+        }
+        MenuIds::CORE_LOG => {
+            let _ = help::open_core_latest_log();
+        }
+        MenuIds::RESTART_CLASH => feat::restart_clash_core().await,
+        MenuIds::RESTART_APP => feat::restart_app().await,
+        MenuIds::LIGHTWEIGHT_MODE => {
+            if !is_in_lightweight_mode() {
+                lightweight::entry_lightweight_mode().await;
+            } else {
+                lightweight::exit_lightweight_mode().await;
+            }
+        }
+        MenuIds::EXIT => {
+            feat::quit().await;
+        }
+        id if id.starts_with("profiles_") => {
+            let profile_index = match id.strip_prefix("profiles_") {
+                Some(index_str) => index_str,
+                None => return,
+            };
+            feat::toggle_proxy_profile(profile_index.into()).await;
+        }
+        id if id.starts_with("delay_group_") => {
+            let Some(group_name) = id.strip_prefix("delay_group_") else {
+                return;
+            };
+            let group_name = group_name.to_string();
+            let verge = Config::verge().await.latest_arc();
+            let test_url = verge
+                .default_latency_test
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("http://cp.cloudflare.com/generate_204")
+                .to_string();
+            let timeout = verge.default_latency_timeout.filter(|t| *t > 0).unwrap_or(10000) as u32;
+            logging!(info, Type::Tray, "托盘菜单点击: 延迟测试 {}", group_name);
+            match handle::Handle::mihomo()
+                .await
+                .delay_group(&group_name, &test_url, timeout)
+                .await
+            {
+                Ok(_) => {
+                    // 测速完成后刷新托盘菜单，重新打开菜单即可看到更新后的延迟
+                    logging_error!(Type::Tray, Tray::global().update_menu().await);
+                }
+                Err(e) => {
+                    logging!(warn, Type::Tray, "延迟测试失败 {}: {}", group_name, e);
+                }
+            }
+        }
+        id if id.starts_with("proxy_") => {
+            // proxy_{group_name}_{proxy_name}
+            let rest = match id.strip_prefix("proxy_") {
+                Some(r) => r,
+                None => return,
+            };
+            let (group_name, proxy_name) = match rest.split_once('_') {
+                Some((g, p)) => (g, p),
+                None => return,
+            };
+            feat::switch_proxy_node(group_name, proxy_name).await;
+        }
+        _ => {
+            logging!(debug, Type::Tray, "Unhandled tray menu event: {}", id);
+        }
+    }
 }

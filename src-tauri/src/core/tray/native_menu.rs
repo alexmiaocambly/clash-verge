@@ -92,11 +92,7 @@ thread_local! {
 
 fn handler(mtm: MainThreadMarker) -> Retained<MenuHandler> {
     let _ = mtm; // 仅用于标记主线程
-    HANDLER.with(|h| {
-        h.borrow_mut()
-            .get_or_insert_with(MenuHandler::new)
-            .clone()
-    })
+    HANDLER.with(|h| h.borrow_mut().get_or_insert_with(MenuHandler::new).clone())
 }
 
 /// 一个代理组在当前菜单里的节点项：(延迟右对齐位置, [(节点名, 菜单项)])
@@ -170,11 +166,11 @@ impl GroupDelayHandler {
 fn delay_color_and_text(delay: Option<u32>) -> (String, Retained<NSColor>) {
     let color = |r: f64, g: f64, b: f64| NSColor::colorWithRed_green_blue_alpha(r, g, b, 1.0);
     match delay {
-        None => ("-ms".to_string(), color(0.48, 0.48, 0.51)),                 // 灰
-        Some(0) => ("超时".to_string(), color(0.80, 0.21, 0.20)),             // 红
+        None => ("-ms".to_string(), color(0.48, 0.48, 0.51)),     // 灰
+        Some(0) => ("超时".to_string(), color(0.80, 0.21, 0.20)), // 红
         Some(d) if d >= 10000 => ("超时".to_string(), color(0.80, 0.21, 0.20)),
-        Some(d) if d > 300 => (format!("{d}ms"), color(0.82, 0.50, 0.08)),    // 橙
-        Some(d) => (format!("{d}ms"), color(0.20, 0.57, 0.26)),               // 绿
+        Some(d) if d > 300 => (format!("{d}ms"), color(0.82, 0.50, 0.08)), // 橙
+        Some(d) => (format!("{d}ms"), color(0.20, 0.57, 0.26)),            // 绿
     }
 }
 
@@ -192,7 +188,12 @@ fn node_attributed_title(node: &str, delay: Option<u32>, location: f64) -> Retai
     let para = NSMutableParagraphStyle::new();
     let options: Retained<NSDictionary<NSString>> = NSDictionary::new();
     let tab = unsafe {
-        NSTextTab::initWithTextAlignment_location_options(NSTextTab::alloc(), NSTextAlignment::Right, location, &options)
+        NSTextTab::initWithTextAlignment_location_options(
+            NSTextTab::alloc(),
+            NSTextAlignment::Right,
+            location,
+            &options,
+        )
     };
     let tabs = NSArray::from_retained_slice(&[tab]);
     para.setTabStops(Some(&tabs));
@@ -227,7 +228,10 @@ fn add_delay_test_row(menu: &NSMenu, mtm: MainThreadMarker, group_name: &str, la
     // view 宽度只取够放按钮的最小值，菜单实际宽度由 NSMenu 的 minimumWidth 统一控制，
     // 避免短节点名组被按钮 view 撑宽、导致延迟右侧留大空白
     let view_w = width.max(140.0);
-    let view = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(view_w, 26.0)));
+    let view = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(view_w, 26.0)),
+    );
     let button = NSButton::new(mtm);
     button.setTitle(&NSString::from_str(label));
     button.setFrame(NSRect::new(NSPoint::new(14.0, 1.0), NSSize::new(120.0, 24.0)));
@@ -330,9 +334,33 @@ fn build_menu(mtm: MainThreadMarker, data: &NativeMenuData) -> Retained<NSMenu> 
     add_separator(&menu, mtm);
 
     // 出站模式（勾选当前模式）
-    add_item(&menu, mtm, &h, MenuIds::RULE_MODE, &texts.rule_mode, data.mode == "rule", true);
-    add_item(&menu, mtm, &h, MenuIds::GLOBAL_MODE, &texts.global_mode, data.mode == "global", true);
-    add_item(&menu, mtm, &h, MenuIds::DIRECT_MODE, &texts.direct_mode, data.mode == "direct", true);
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::RULE_MODE,
+        &texts.rule_mode,
+        data.mode == "rule",
+        true,
+    );
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::GLOBAL_MODE,
+        &texts.global_mode,
+        data.mode == "global",
+        true,
+    );
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::DIRECT_MODE,
+        &texts.direct_mode,
+        data.mode == "direct",
+        true,
+    );
     add_separator(&menu, mtm);
 
     // 代理组（ClashX 式：平铺到顶层，每行 = 组名 + 右侧当前节点 + 子菜单选节点）
@@ -342,8 +370,24 @@ fn build_menu(mtm: MainThreadMarker, data: &NativeMenuData) -> Retained<NSMenu> 
     add_separator(&menu, mtm);
 
     // 系统代理 / TUN（勾选 + 可用性禁用态）
-    add_item(&menu, mtm, &h, MenuIds::SYSTEM_PROXY, &texts.system_proxy, data.system_proxy, true);
-    add_item(&menu, mtm, &h, MenuIds::TUN_MODE, &texts.tun_mode, data.tun_mode, data.tun_available);
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::SYSTEM_PROXY,
+        &texts.system_proxy,
+        data.system_proxy,
+        true,
+    );
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::TUN_MODE,
+        &texts.tun_mode,
+        data.tun_mode,
+        data.tun_available,
+    );
     add_separator(&menu, mtm);
 
     // 订阅子菜单（位于 TUN 模式与轻量模式之间，用分隔线隔开）
@@ -365,9 +409,25 @@ fn build_menu(mtm: MainThreadMarker, data: &NativeMenuData) -> Retained<NSMenu> 
     }
 
     // 显示实时速率（勾选）
-    add_item(&menu, mtm, &h, MenuIds::TRAY_SPEED, &texts.tray_speed, data.tray_speed, true);
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::TRAY_SPEED,
+        &texts.tray_speed,
+        data.tray_speed,
+        true,
+    );
     // 轻量模式
-    add_item(&menu, mtm, &h, MenuIds::LIGHTWEIGHT_MODE, &texts.lightweight_mode, data.lightweight, true);
+    add_item(
+        &menu,
+        mtm,
+        &h,
+        MenuIds::LIGHTWEIGHT_MODE,
+        &texts.lightweight_mode,
+        data.lightweight,
+        true,
+    );
 
     // 打开目录子菜单
     let dir_submenu = NSMenu::new(mtm);
@@ -381,10 +441,42 @@ fn build_menu(mtm: MainThreadMarker, data: &NativeMenuData) -> Retained<NSMenu> 
     // 更多子菜单
     let more_submenu = NSMenu::new(mtm);
     add_item(&more_submenu, mtm, &h, MenuIds::COPY_ENV, &texts.copy_env, false, true);
-    add_item(&more_submenu, mtm, &h, MenuIds::CLOSE_ALL_CONNECTIONS, &texts.close_all_connections, false, true);
-    add_item(&more_submenu, mtm, &h, MenuIds::RESTART_CLASH, &texts.restart_clash, false, true);
-    add_item(&more_submenu, mtm, &h, MenuIds::RESTART_APP, &texts.restart_app, false, true);
-    add_item(&more_submenu, mtm, &h, MenuIds::VERGE_VERSION, &texts.verge_version, false, true);
+    add_item(
+        &more_submenu,
+        mtm,
+        &h,
+        MenuIds::CLOSE_ALL_CONNECTIONS,
+        &texts.close_all_connections,
+        false,
+        true,
+    );
+    add_item(
+        &more_submenu,
+        mtm,
+        &h,
+        MenuIds::RESTART_CLASH,
+        &texts.restart_clash,
+        false,
+        true,
+    );
+    add_item(
+        &more_submenu,
+        mtm,
+        &h,
+        MenuIds::RESTART_APP,
+        &texts.restart_app,
+        false,
+        true,
+    );
+    add_item(
+        &more_submenu,
+        mtm,
+        &h,
+        MenuIds::VERGE_VERSION,
+        &texts.verge_version,
+        false,
+        true,
+    );
     add_submenu(&menu, mtm, &texts.more, &more_submenu);
     add_separator(&menu, mtm);
 
@@ -402,8 +494,7 @@ fn text_width(text: &str, font: &NSFont) -> f64 {
         let vals: &[&AnyObject] = &[font];
         NSDictionary::from_slices(keys, vals)
     };
-    let attr =
-        unsafe { NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &ns, Some(&attrs)) };
+    let attr = unsafe { NSAttributedString::initWithString_attributes(NSAttributedString::alloc(), &ns, Some(&attrs)) };
     attr.size().width
 }
 
@@ -417,7 +508,12 @@ fn group_title(group_name: &str, now: &str, location: f64) -> Retained<NSMutable
     let para = NSMutableParagraphStyle::new();
     let options: Retained<NSDictionary<NSString>> = NSDictionary::new();
     let tab = unsafe {
-        NSTextTab::initWithTextAlignment_location_options(NSTextTab::alloc(), NSTextAlignment::Right, location, &options)
+        NSTextTab::initWithTextAlignment_location_options(
+            NSTextTab::alloc(),
+            NSTextAlignment::Right,
+            location,
+            &options,
+        )
     };
     let tabs = NSArray::from_retained_slice(&[tab]);
     para.setTabStops(Some(&tabs));
