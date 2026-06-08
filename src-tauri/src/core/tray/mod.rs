@@ -41,6 +41,12 @@ type ProxyMenuItem = (Option<Submenu<Wry>>, Vec<Box<dyn IsMenuItem<Wry>>>);
 const TRAY_CLICK_DEBOUNCE_MS: u64 = 300;
 pub const TRAY_ID: &str = "clash-verge-rev-tray";
 
+/// 托盘左键点击的默认行为：macOS / Windows 默认弹出托盘菜单，其余平台显示主窗口
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+const DEFAULT_TRAY_EVENT: &str = "tray_menu";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const DEFAULT_TRAY_EVENT: &str = "main_window";
+
 #[derive(Clone)]
 struct TrayState {}
 
@@ -168,7 +174,7 @@ impl Tray {
 
         let app_handle = handle::Handle::app_handle();
         let tray_event = { Config::verge().await.latest_arc().tray_event.clone() };
-        let tray_event = TrayAction::from(tray_event.as_deref().unwrap_or("main_window"));
+        let tray_event = TrayAction::from(tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT));
         let tray = app_handle
             .tray_by_id(TRAY_ID)
             .ok_or_else(|| anyhow::anyhow!("Failed to get main tray"))?;
@@ -365,7 +371,8 @@ impl Tray {
         let builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let show_menu_on_left_click = verge.tray_event.as_ref().is_some_and(|v| v == "tray_menu");
+        let show_menu_on_left_click =
+            verge.tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT) == "tray_menu";
 
         #[cfg(not(target_os = "linux"))]
         let mut builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
@@ -888,7 +895,7 @@ fn on_tray_icon_event(_tray_icon: &TrayIcon, tray_event: TrayIconEvent) {
 
         AsyncHandler::spawn(|| async move {
             let verge = Config::verge().await.data_arc();
-            let verge_tray_event = verge.tray_event.clone().unwrap_or_else(|| "main_window".into());
+            let verge_tray_event = verge.tray_event.clone().unwrap_or_else(|| DEFAULT_TRAY_EVENT.into());
             let verge_tray_action = TrayAction::from(verge_tray_event.as_str());
             logging!(debug, Type::Tray, "tray event: {verge_tray_action:?}");
             match verge_tray_action {
@@ -903,6 +910,8 @@ fn on_tray_icon_event(_tray_icon: &TrayIcon, tray_event: TrayIconEvent) {
                         WindowManager::show_main_window().await;
                     };
                 }
+                // 菜单由系统在左键点击时直接弹出，应用侧无需额外处理
+                TrayAction::TrayMenu => {}
                 _ => {
                     logging!(warn, Type::Tray, "invalid tray event: {}", verge_tray_event);
                 }
