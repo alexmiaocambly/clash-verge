@@ -508,8 +508,7 @@ impl Tray {
         let builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
 
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        let show_menu_on_left_click =
-            verge.tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT) == "tray_menu";
+        let show_menu_on_left_click = verge.tray_event.as_deref().unwrap_or(DEFAULT_TRAY_EVENT) == "tray_menu";
 
         #[cfg(not(target_os = "linux"))]
         let mut builder = TrayIconBuilder::with_id(TRAY_ID).icon(icon).icon_as_template(false);
