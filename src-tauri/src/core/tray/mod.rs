@@ -1297,6 +1297,7 @@ pub(crate) async fn dispatch_menu_id(id: &str) {
         MenuIds::TUN_MODE => {
             feat::toggle_tun_mode(None).await;
         }
+        #[cfg(target_os = "macos")]
         MenuIds::TRAY_SPEED => {
             let cur = Config::verge().await.latest_arc().enable_tray_speed.unwrap_or(false);
             let patch = IVerge {
