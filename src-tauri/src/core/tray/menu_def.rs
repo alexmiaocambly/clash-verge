@@ -33,7 +33,7 @@ define_menu! {
     outbound_modes => OUTBOUND_MODES, "tray_outbound_modes", "tray.outboundModes",
     profiles => PROFILES, "tray_profiles", "tray.profiles",
     proxies => PROXIES, "tray_proxies", "tray.proxies",
-    delay_test => DELAY_TEST, "tray_delay_test", "tray.delayTest",
+    test_latency => TEST_LATENCY, "tray_test_latency", "tray.testLatency",
     system_proxy => SYSTEM_PROXY, "tray_system_proxy", "tray.systemProxy",
     tun_mode => TUN_MODE, "tray_tun_mode", "tray.tunMode",
     tray_speed => TRAY_SPEED, "tray_tray_speed", "tray.traySpeed",

@@ -10,11 +10,8 @@
 //! 用于验证「原生菜单接管 + 事件分发」机制。订阅/代理等动态项后续补全。
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use crate::config::Config;
 use crate::core::handle::Handle;
 use crate::process::AsyncHandler;
 use crate::{Type, logging};
@@ -31,7 +28,6 @@ use objc2_foundation::{
     NSString,
 };
 use tauri::tray::TrayIcon;
-use tauri_plugin_mihomo::models::Proxies;
 
 use super::menu_def::{MenuIds, MenuTexts};
 
@@ -40,6 +36,22 @@ pub struct ProfileEntry {
     pub uid: String,
     pub name: String,
     pub is_current: bool,
+}
+
+/// 代理组内的一个节点
+pub struct ProxyNodeEntry {
+    pub name: String,
+    pub delay: Option<u32>,
+    /// 来自 provider 的节点：(provider 名, provider 内的节点名)，测速需走 provider 的健康检查接口
+    pub provider: Option<(String, String)>,
+}
+
+/// 一个代理组（owned，已按模式/隐藏标记过滤并排好序）
+pub struct ProxyGroupEntry {
+    pub name: String,
+    pub now: String,
+    pub test_url: String,
+    pub nodes: Vec<ProxyNodeEntry>,
 }
 
 /// 构建原生菜单所需的状态快照（均为 Send，可跨线程传入主线程回调）
@@ -51,8 +63,8 @@ pub struct NativeMenuData {
     pub tray_speed: bool,
     pub lightweight: bool,
     pub profiles: Vec<ProfileEntry>,
-    pub proxies: Option<Arc<Proxies>>,
-    pub proxy_order: Option<HashMap<String, usize>>,
+    pub proxy_groups: Vec<ProxyGroupEntry>,
+    pub latency_timeout: u32,
 }
 
 define_class!(
@@ -107,6 +119,10 @@ thread_local! {
 
 struct GroupDelayIvars {
     group_name: String,
+    test_url: String,
+    timeout: u32,
+    /// (节点名, provider 信息)
+    nodes: Vec<(String, Option<(String, String)>)>,
 }
 
 define_class!(
@@ -119,45 +135,36 @@ define_class!(
         /// 「延迟测试」按钮 action：后台测速该组，完成后回主线程就地刷新各节点延迟（菜单不关闭）
         #[unsafe(method(onDelayTest:))]
         fn on_delay_test(&self, _sender: &NSButton) {
-            let group = self.ivars().group_name.clone();
-            logging!(info, Type::Tray, "[native] 延迟测试: {}", group);
-            // 取该组当前节点列表，逐个并发测速，每个返回即刷新自己（逐个跳动）
-            let nodes: Vec<String> = NODE_ITEMS.with(|m| {
-                m.borrow()
-                    .get(&group)
-                    .map(|(_, v)| v.iter().map(|(n, _)| n.clone()).collect())
-                    .unwrap_or_default()
-            });
-            AsyncHandler::spawn(move || async move {
-                let verge = Config::verge().await.latest_arc();
-                let test_url = verge
-                    .default_latency_test
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("http://cp.cloudflare.com/generate_204")
-                    .to_string();
-                let timeout = verge.default_latency_timeout.filter(|t| *t > 0).unwrap_or(10000) as u32;
-                for node in nodes {
-                    let url = test_url.clone();
-                    let group = group.clone();
-                    AsyncHandler::spawn(move || async move {
-                        let delay = match Handle::mihomo().await.delay_proxy_by_name(&node, &url, timeout).await {
-                            Ok(d) => Some(d.delay),
-                            Err(_) => Some(0), // 失败按超时（红）
-                        };
-                        let app = Handle::app_handle();
-                        let _ = app.run_on_main_thread(move || update_node_delay(&group, &node, delay));
-                    });
-                }
-            });
+            let ivars = self.ivars();
+            logging!(info, Type::Tray, "[native] 延迟测试: {}", ivars.group_name);
+            // 逐个并发测速，每个返回即刷新自己（逐个跳动）
+            let timeout = ivars.timeout;
+            for (node, provider) in ivars.nodes.clone() {
+                let url = ivars.test_url.clone();
+                let group = ivars.group_name.clone();
+                AsyncHandler::spawn(move || async move {
+                    let mihomo = Handle::mihomo();
+                    let result = match &provider {
+                        Some((provider_name, proxy_name)) => {
+                            mihomo
+                                .healthcheck_node_in_provider(provider_name, proxy_name, &url, timeout)
+                                .await
+                        }
+                        None => mihomo.delay_proxy_by_name(&node, &url, timeout).await,
+                    };
+                    // 失败按超时（红）
+                    let delay = Some(result.map_or(0, |d| d.delay));
+                    let app = Handle::app_handle();
+                    let _ = app.run_on_main_thread(move || update_node_delay(&group, &node, delay));
+                });
+            }
         }
     }
 );
 
 impl GroupDelayHandler {
-    fn new(group_name: String) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(GroupDelayIvars { group_name });
+    fn new(ivars: GroupDelayIvars) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(ivars);
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -224,7 +231,7 @@ fn update_node_delay(group: &str, node: &str, delay: Option<u32>) {
 }
 
 /// 子菜单顶部「延迟测试」自定义行：点击按钮触发测速，菜单不关闭
-fn add_delay_test_row(menu: &NSMenu, mtm: MainThreadMarker, group_name: &str, label: &str, width: f64) {
+fn add_delay_test_row(menu: &NSMenu, mtm: MainThreadMarker, ivars: GroupDelayIvars, label: &str, width: f64) {
     // view 宽度只取够放按钮的最小值，菜单实际宽度由 NSMenu 的 minimumWidth 统一控制，
     // 避免短节点名组被按钮 view 撑宽、导致延迟右侧留大空白
     let view_w = width.max(140.0);
@@ -236,7 +243,7 @@ fn add_delay_test_row(menu: &NSMenu, mtm: MainThreadMarker, group_name: &str, la
     button.setTitle(&NSString::from_str(label));
     button.setFrame(NSRect::new(NSPoint::new(14.0, 1.0), NSSize::new(120.0, 24.0)));
 
-    let handler = GroupDelayHandler::new(group_name.to_string());
+    let handler = GroupDelayHandler::new(ivars);
     unsafe {
         button.setTarget(Some(&handler));
         button.setAction(Some(sel!(onDelayTest:)));
@@ -364,9 +371,7 @@ fn build_menu(mtm: MainThreadMarker, data: &NativeMenuData) -> Retained<NSMenu> 
     add_separator(&menu, mtm);
 
     // 代理组（ClashX 式：平铺到顶层，每行 = 组名 + 右侧当前节点 + 子菜单选节点）
-    if let Some(proxies) = &data.proxies {
-        add_proxy_groups_inline(&menu, mtm, &h, &texts, &data.mode, proxies, &data.proxy_order);
-    }
+    add_proxy_groups_inline(&menu, mtm, &h, &texts, &data.proxy_groups, data.latency_timeout);
     add_separator(&menu, mtm);
 
     // 系统代理 / TUN（勾选 + 可用性禁用态）
@@ -538,33 +543,20 @@ fn build_group_submenu(
     mtm: MainThreadMarker,
     h: &MenuHandler,
     texts: &MenuTexts,
-    group_name: &str,
-    all: &[String],
-    now: &str,
-    proxies: &Proxies,
+    group: &ProxyGroupEntry,
+    timeout: u32,
 ) -> Retained<NSMenu> {
     let group_menu = NSMenu::new(mtm);
 
-    // 收集节点初始延迟，测量最宽节点行（节点名 + 间隔 + 延迟文字）作为延迟右对齐位置
+    // 测量最宽节点行（节点名 + 间隔 + 延迟文字）作为延迟右对齐位置
     const NODE_GAP: f64 = 24.0;
     let menu_font = NSFont::menuFontOfSize(0.0);
-    let entries: Vec<(String, Option<u32>, bool)> = all
+    let location = group
+        .nodes
         .iter()
         .map(|node| {
-            let delay = proxies
-                .proxies
-                .get(node)
-                .and_then(|n| n.history.last())
-                .map(|hh| u32::from(hh.delay))
-                .filter(|d| *d != 0);
-            (node.clone(), delay, node.as_str() == now)
-        })
-        .collect();
-    let location = entries
-        .iter()
-        .map(|(node, delay, _)| {
-            let (delay_text, _) = delay_color_and_text(*delay);
-            text_width(node, &menu_font) + NODE_GAP + text_width(&delay_text, &menu_font)
+            let (delay_text, _) = delay_color_and_text(node.delay);
+            text_width(&node.name, &menu_font) + NODE_GAP + text_width(&delay_text, &menu_font)
         })
         .fold(0.0_f64, f64::max);
 
@@ -572,74 +564,67 @@ fn build_group_submenu(
     group_menu.setMinimumWidth(location + 38.0);
 
     // 顶部「延迟测试」自定义行：点击不关闭菜单、实时刷新本组延迟
-    add_delay_test_row(&group_menu, mtm, group_name, &texts.delay_test, location);
+    add_delay_test_row(
+        &group_menu,
+        mtm,
+        GroupDelayIvars {
+            group_name: group.name.clone(),
+            test_url: group.test_url.clone(),
+            timeout,
+            nodes: group
+                .nodes
+                .iter()
+                .map(|node| (node.name.clone(), node.provider.clone()))
+                .collect(),
+        },
+        &texts.test_latency,
+        location,
+    );
 
-    let mut node_items: Vec<(String, Retained<NSMenuItem>)> = Vec::with_capacity(entries.len());
-    for (node, delay, checked) in &entries {
-        let item = add_node_item(&group_menu, mtm, h, group_name, node, *delay, *checked, location);
-        node_items.push((node.clone(), item));
+    let mut node_items: Vec<(String, Retained<NSMenuItem>)> = Vec::with_capacity(group.nodes.len());
+    for node in &group.nodes {
+        let item = add_node_item(
+            &group_menu,
+            mtm,
+            h,
+            &group.name,
+            &node.name,
+            node.delay,
+            node.name == group.now,
+            location,
+        );
+        node_items.push((node.name.clone(), item));
     }
     // 记录本组徽章右对齐位置与节点项引用，供测速后就地刷新
-    NODE_ITEMS.with(|m| m.borrow_mut().insert(group_name.to_string(), (location, node_items)));
+    NODE_ITEMS.with(|m| m.borrow_mut().insert(group.name.clone(), (location, node_items)));
     group_menu
 }
 
-/// 把代理组平铺加入顶层菜单：每组一行（组名 + 右侧当前节点 + 子菜单选节点），按 runtime 顺序排序
+/// 把代理组平铺加入顶层菜单：每组一行（组名 + 右侧当前节点 + 子菜单选节点）
 fn add_proxy_groups_inline(
     menu: &NSMenu,
     mtm: MainThreadMarker,
     h: &MenuHandler,
     texts: &MenuTexts,
-    mode: &str,
-    proxies: &Proxies,
-    order: &Option<HashMap<String, usize>>,
+    groups: &[ProxyGroupEntry],
+    timeout: u32,
 ) {
     // 组名与当前节点之间的最小留白
     const GROUP_NODE_GAP: f64 = 40.0;
     let font = NSFont::menuFontOfSize(0.0);
 
-    // 第一遍：过滤、构建子菜单、测量最宽组（组名 + 间隔 + 当前节点）
-    let mut collected: Vec<(String, String, Retained<NSMenu>)> = Vec::new();
-    let mut max_width: f64 = 0.0;
-    for (group_name, group_data) in proxies.proxies.iter() {
-        let should_show = match mode {
-            "global" => group_name == "GLOBAL",
-            _ => group_name != "GLOBAL",
-        } && !group_data.hidden.unwrap_or_default();
-        if !should_show {
-            continue;
-        }
-        let Some(all) = group_data.all.as_ref() else {
-            continue;
-        };
-        if all.is_empty() {
-            continue;
-        }
-        let now = group_data.now.as_deref().unwrap_or_default();
+    // 统一的右对齐位置取最宽组（组名 + 间隔 + 当前节点），使当前节点紧贴箭头
+    let max_width = groups
+        .iter()
+        .map(|group| text_width(&group.name, &font) + GROUP_NODE_GAP + text_width(&group.now, &font))
+        .fold(0.0_f64, f64::max);
 
-        let width = text_width(group_name, &font) + GROUP_NODE_GAP + text_width(now, &font);
-        if width > max_width {
-            max_width = width;
-        }
-        let submenu = build_group_submenu(mtm, h, texts, group_name, all, now, proxies);
-        collected.push((group_name.to_string(), now.to_string(), submenu));
-    }
-
-    if let Some(order_map) = order {
-        collected.sort_by(|(a, _, _), (b, _, _)| match (order_map.get(a), order_map.get(b)) {
-            (Some(x), Some(y)) => x.cmp(y),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        });
-    }
-
-    // 第二遍：用统一的右对齐位置（最宽组宽度）构建菜单项，使当前节点紧贴箭头
-    for (group_name, now, submenu) in &collected {
+    for group in groups {
+        let submenu = build_group_submenu(mtm, h, texts, group, timeout);
         let item = NSMenuItem::new(mtm);
-        let title = group_title(group_name, now, max_width);
+        let title = group_title(&group.name, &group.now, max_width);
         item.setAttributedTitle(Some(&title));
-        item.setSubmenu(Some(submenu));
+        item.setSubmenu(Some(&submenu));
         menu.addItem(&item);
     }
 }
