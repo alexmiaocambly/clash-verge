@@ -74,6 +74,7 @@ tray:
   testingLatency: در حال آزمایش تأخیر…
   systemProxy: پروکسی سیستم
   tunMode: حالت TUN
+  traySpeed: نمایش سرعت شبکه
   closeAllConnections: بستن همه اتصال‌ها
   lightweightMode: حالت سبک
   copyEnv: کپی متغیرهای محیطی

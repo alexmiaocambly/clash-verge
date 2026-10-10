@@ -3,6 +3,8 @@ use std::borrow::Cow;
 
 macro_rules! define_menu {
     ($($field:ident => $const_name:ident, $id:expr, $text:expr),+ $(,)?) => {
+        // 部分文案仅 macOS 原生菜单使用
+        #[allow(dead_code)]
         #[derive(Debug)]
         pub struct MenuTexts {
             $(pub $field: Cow<'static, str>,)+
@@ -18,6 +20,7 @@ macro_rules! define_menu {
             }
         }
 
+        #[allow(dead_code)]
         impl MenuIds {
             $(pub const $const_name: &'static str = $id;)+
         }
@@ -35,6 +38,7 @@ define_menu! {
     test_latency => TEST_LATENCY, "tray_test_latency", "tray.testLatency",
     system_proxy => SYSTEM_PROXY, "tray_system_proxy", "tray.systemProxy",
     tun_mode => TUN_MODE, "tray_tun_mode", "tray.tunMode",
+    tray_speed => TRAY_SPEED, "tray_tray_speed", "tray.traySpeed",
     close_all_connections => CLOSE_ALL_CONNECTIONS, "tray_close_all_connections", "tray.closeAllConnections",
     lightweight_mode => LIGHTWEIGHT_MODE, "tray_lightweight_mode", "tray.lightweightMode",
     copy_env => COPY_ENV, "tray_copy_env", "tray.copyEnv",

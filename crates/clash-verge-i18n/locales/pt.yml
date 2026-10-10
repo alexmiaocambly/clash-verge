@@ -72,6 +72,7 @@ tray:
   proxies: Proxies
   systemProxy: Proxy do sistema
   tunMode: Modo TUN
+  traySpeed: Mostrar velocidade da rede
   closeAllConnections: Fechar todas as conexões
   lightweightMode: Modo leve
   copyEnv: Copiar variáveis de ambiente

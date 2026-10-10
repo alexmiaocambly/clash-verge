@@ -74,6 +74,7 @@ tray:
   testingLatency: Кичектерү тикшерелә…
   systemProxy: Системалы прокси
   tunMode: TUN режимы
+  traySpeed: Show Network Speed
   closeAllConnections: Барлык тоташуларны ябу
   lightweightMode: Җиңел режим
   copyEnv: Мохит үзгәрүчәннәрен күчерү

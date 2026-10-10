@@ -74,6 +74,7 @@ tray:
   testingLatency: جارٍ اختبار التأخير…
   systemProxy: وكيل النظام
   tunMode: وضع TUN
+  traySpeed: إظهار سرعة الشبكة
   closeAllConnections: إغلاق كل الاتصالات
   lightweightMode: الوضع الخفيف
   copyEnv: نسخ متغيرات البيئة

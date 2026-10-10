@@ -74,6 +74,7 @@ tray:
   testingLatency: Gecikme test ediliyor…
   systemProxy: Sistem Vekil'i
   tunMode: TUN Modu
+  traySpeed: Ağ Hızını Göster
   closeAllConnections: Tüm Bağlantıları Kapat
   lightweightMode: Hafif Mod
   copyEnv: Ortam Değişkenlerini Kopyala

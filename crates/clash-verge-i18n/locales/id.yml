@@ -74,6 +74,7 @@ tray:
   testingLatency: Menguji latensi…
   systemProxy: Proksi Sistem
   tunMode: Mode TUN
+  traySpeed: Tampilkan Kecepatan Jaringan
   closeAllConnections: Tutup Semua Koneksi
   lightweightMode: Mode Ringan
   copyEnv: Salin Variabel Lingkungan

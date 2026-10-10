@@ -31,6 +31,8 @@ use tauri::{
 mod latency;
 mod menu_def;
 #[cfg(target_os = "macos")]
+mod native_menu;
+#[cfg(target_os = "macos")]
 mod speed_task;
 use menu_def::{MenuIds, MenuTexts};
 
@@ -46,6 +48,11 @@ pub const TRAY_ID: &str = "clash-verge-rev-tray";
 const DEFAULT_TRAY_EVENT: &str = "tray_menu";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const DEFAULT_TRAY_EVENT: &str = "main_window";
+
+/// macOS 原生托盘菜单上次成功获取的代理数据缓存。
+/// 获取代理数据偶发超时/失败时复用它，避免代理组在菜单里随机消失。
+#[cfg(target_os = "macos")]
+static LAST_PROXIES: parking_lot::Mutex<Option<std::sync::Arc<ProxyViewV1>>> = parking_lot::Mutex::new(None);
 
 #[derive(Clone, Copy)]
 struct TrayMenuOptions {
@@ -247,6 +254,16 @@ impl Tray {
         let profiles_preview = profiles_arc.profiles_preview().unwrap_or_default();
         let is_lightweight_mode = is_in_lightweight_mode();
 
+        // 在 profiles_preview 被 muda 菜单消费前，提取原生菜单所需的 owned 数据
+        #[cfg(target_os = "macos")]
+        let native_profiles: Vec<native_menu::ProfileEntry> = profiles_preview
+            .iter()
+            .map(|p| native_menu::ProfileEntry {
+                uid: p.uid.to_string(),
+                name: p.name.to_string(),
+                is_current: p.is_current,
+            })
+            .collect();
         let (menu, latency_items) = create_tray_menu(
             app_handle,
             Some(mode.as_str()),
@@ -265,6 +282,54 @@ impl Tray {
         *self.latency_items.lock() = latency_items;
         for group in groups {
             self.refresh_latency_item(&group);
+        }
+
+        // tray-icon 的左键弹出依赖其内部持有的 muda 菜单非空（据此触发 performClick），
+        // 因此 macOS 仍保留上面的 muda 菜单作为“点击触发器”，再用原生 NSMenu 覆盖
+        // NSStatusItem.menu 作为实际显示内容。
+        #[cfg(target_os = "macos")]
+        {
+            let fetched = if include_proxy_groups {
+                tokio::time::timeout(
+                    Duration::from_millis(3000),
+                    cmd::proxy::proxy_view(Some(Duration::from_millis(750))),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(std::sync::Arc::new)
+            } else {
+                None
+            };
+            // 超时、失败或快速刷新（不取代理数据）时复用上次成功的数据，避免代理组消失
+            let view = match fetched {
+                Some(view) => {
+                    *LAST_PROXIES.lock() = Some(std::sync::Arc::clone(&view));
+                    Some(view)
+                }
+                None => LAST_PROXIES.lock().clone(),
+            };
+            let proxy_groups = view
+                .as_deref()
+                .map(|view| native_proxy_groups(view, &mode, &verge, &profiles_arc))
+                .unwrap_or_default();
+            native_menu::refresh(
+                &tray,
+                native_menu::NativeMenuData {
+                    mode: mode.clone(),
+                    system_proxy: *system_proxy,
+                    tun_mode: *tun_mode,
+                    tun_available: tun_mode_available,
+                    tray_speed: verge.enable_tray_speed.unwrap_or(false),
+                    lightweight: is_lightweight_mode,
+                    profiles: native_profiles,
+                    proxy_groups,
+                    latency_timeout: verge
+                        .default_latency_timeout
+                        .filter(|timeout| *timeout > 0)
+                        .unwrap_or(10000) as u32,
+                },
+            );
         }
 
         logging!(debug, Type::Tray, "托盘菜单更新成功");
@@ -402,6 +467,16 @@ impl Tray {
         let icon = Some(tauri::image::Image::from_bytes(&icon_bytes)?);
 
         logging_error!(Type::Tray, tray.set_icon_with_as_template(icon, template));
+
+        // set_icon 会把按钮 imagePosition 重设为 ImageLeft，导致按钮重新自绘图标、与 SpeedView 的图标重复。
+        #[cfg(target_os = "macos")]
+        if verge.enable_tray_speed.unwrap_or(false) {
+            let _ = tray.with_inner_tray_icon(|inner| {
+                if let Some(si) = inner.ns_status_item() {
+                    crate::utils::tray_speed::reassert_speed_icon(&si);
+                }
+            });
+        }
 
         Ok(())
     }
@@ -650,6 +725,59 @@ fn member_provider<'a>(view: &'a ProxyViewV1, member: &ProxyMemberRef) -> Option
         ProxyNodeSource::Provider { provider_name, .. } => Some(provider_name),
         ProxyNodeSource::Core { .. } => None,
     }
+}
+
+/// 把代理视图整理成 macOS 原生菜单所需的 owned 数据（按模式/隐藏标记过滤，顺序沿用视图顺序）
+#[cfg(target_os = "macos")]
+fn native_proxy_groups(
+    view: &ProxyViewV1,
+    proxy_mode: &str,
+    verge: &IVerge,
+    profiles: &crate::config::IProfiles,
+) -> Vec<native_menu::ProxyGroupEntry> {
+    view.groups
+        .iter()
+        .chain(view.global.iter())
+        .filter(|group| {
+            !group.hidden.unwrap_or_default()
+                && (proxy_mode == "global") == (group.name == "GLOBAL")
+                && !group.members.is_empty()
+        })
+        .map(|group| {
+            let url = latency::test_url(group, verge, profiles);
+            let nodes = group
+                .members
+                .iter()
+                .map(|member| {
+                    let (delay, provider) = match member {
+                        ProxyMemberRef::Node { record_id, .. } => (
+                            node_delay(view, record_id, &url),
+                            match view.records.get(record_id).map(|node| &node.source) {
+                                Some(ProxyNodeSource::Provider {
+                                    provider_name,
+                                    proxy_name,
+                                }) => Some((provider_name.clone(), proxy_name.clone())),
+                                _ => None,
+                            },
+                        ),
+                        ProxyMemberRef::Group { name } => (selected_member_delay(view, name, &url), None),
+                        ProxyMemberRef::Unresolved { .. } => (None, None),
+                    };
+                    native_menu::ProxyNodeEntry {
+                        name: member_name(member).to_owned(),
+                        delay: delay.map(u32::from).filter(|delay| *delay != 0),
+                        provider,
+                    }
+                })
+                .collect();
+            native_menu::ProxyGroupEntry {
+                name: group.name.clone(),
+                now: group.now.clone().unwrap_or_default(),
+                test_url: url,
+                nodes,
+            }
+        })
+        .collect()
 }
 
 fn proxy_item_text(view: &ProxyViewV1, member: &ProxyMemberRef, url: &str, verge: &IVerge) -> std::string::String {
@@ -1142,88 +1270,106 @@ fn on_menu_event(_: &AppHandle, event: MenuEvent) {
         return;
     }
     AsyncHandler::spawn(|| async move {
-        match event.id.as_ref() {
-            mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
-                if let Some(final_mode) = mode.strip_circumfix("tray_", "_mode") {
-                    logging!(info, Type::ProxyMode, "Switch Proxy Mode To: {}", final_mode);
-                    let _ = feat::change_clash_mode(final_mode.into()).await;
-                }
-            }
-            MenuIds::DASHBOARD => {
-                logging!(info, Type::Tray, "托盘菜单点击: 打开窗口");
-                if !lightweight::exit_lightweight_mode().await {
-                    WindowManager::show_main_window().await;
-                };
-            }
-            MenuIds::SYSTEM_PROXY => {
-                let _ = feat::toggle_system_proxy().await;
-            }
-            MenuIds::TUN_MODE => {
-                feat::toggle_tun_mode(None).await;
-            }
-            MenuIds::CLOSE_ALL_CONNECTIONS => {
-                if let Err(err) = handle::Handle::mihomo().close_all_connections().await {
-                    logging!(error, Type::Tray, "Failed to close all connections from tray: {err}");
-                }
-            }
-            MenuIds::COPY_ENV => feat::copy_clash_env().await,
-            MenuIds::CONF_DIR => {
-                let _ = cmd::open_app_dir().await;
-            }
-            MenuIds::CORE_DIR => {
-                let _ = cmd::open_core_dir().await;
-            }
-            MenuIds::LOGS_DIR => {
-                let _ = cmd::open_logs_dir().await;
-            }
-            MenuIds::APP_LOG => {
-                let _ = help::open_app_latest_log();
-            }
-            MenuIds::CORE_LOG => {
-                let _ = help::open_core_latest_log().await;
-            }
-            MenuIds::RESTART_CLASH => feat::restart_clash_core().await,
-            MenuIds::RESTART_APP => feat::restart_app().await,
-            MenuIds::LIGHTWEIGHT_MODE => {
-                if !is_in_lightweight_mode() {
-                    lightweight::entry_lightweight_mode().await;
-                } else {
-                    lightweight::exit_lightweight_mode().await;
-                }
-            }
-            MenuIds::EXIT => {
-                feat::quit().await;
-            }
-            id if id.starts_with("profiles_") => {
-                let profile_index = match id.strip_prefix("profiles_") {
-                    Some(index_str) => index_str,
-                    None => return,
-                };
-                feat::toggle_proxy_profile(profile_index.into()).await;
-            }
-            id if id.starts_with(MenuIds::TEST_LATENCY) => {
-                let group_name = id
-                    .strip_prefix(MenuIds::TEST_LATENCY)
-                    .and_then(|rest| rest.strip_prefix('_'));
-                if let Some(group_name) = group_name {
-                    logging!(info, Type::Tray, "Tray menu: test group latency {}", group_name);
-                    latency::test_proxy_group_delay(group_name).await;
-                }
-            }
-            id if id.starts_with("proxy_") => {
-                let rest = match id.strip_prefix("proxy_") {
-                    Some(r) => r,
-                    None => return,
-                };
-                let (group_name, proxy_name) = match rest.split_once('_') {
-                    Some((g, p)) => (g, p),
-                    None => return,
-                };
-                feat::switch_proxy_node(group_name, proxy_name).await;
-            }
-            _ => {
-                logging!(debug, Type::Tray, "Unhandled tray menu event: {:?}", event.id);
+        dispatch_menu_id(event.id.as_ref()).await;
+    });
+}
+
+/// 菜单项 id → 行为分发。muda 托盘菜单与 macOS 原生菜单共用同一套分发逻辑。
+// 一个菜单项一个分支的大 match，认知复杂度高属正常，无需拆分。
+#[allow(clippy::cognitive_complexity)]
+pub(crate) async fn dispatch_menu_id(id: &str) {
+    match id {
+        mode @ (MenuIds::RULE_MODE | MenuIds::GLOBAL_MODE | MenuIds::DIRECT_MODE) => {
+            if let Some(final_mode) = mode.strip_circumfix("tray_", "_mode") {
+                logging!(info, Type::ProxyMode, "Switch Proxy Mode To: {}", final_mode);
+                let _ = feat::change_clash_mode(final_mode.into()).await;
             }
         }
-    });
+        MenuIds::DASHBOARD => {
+            logging!(info, Type::Tray, "托盘菜单点击: 打开窗口");
+            if !lightweight::exit_lightweight_mode().await {
+                WindowManager::show_main_window().await;
+            };
+        }
+        MenuIds::SYSTEM_PROXY => {
+            let _ = feat::toggle_system_proxy().await;
+        }
+        MenuIds::TUN_MODE => {
+            feat::toggle_tun_mode(None).await;
+        }
+        #[cfg(target_os = "macos")]
+        MenuIds::TRAY_SPEED => {
+            let cur = Config::verge().await.latest_arc().enable_tray_speed.unwrap_or(false);
+            let patch = IVerge {
+                enable_tray_speed: Some(!cur),
+                ..Default::default()
+            };
+            logging_error!(Type::Tray, feat::patch_verge(&patch, false).await);
+            // patch_verge 对 enable_tray_speed 只刷新图标/速率任务，不刷新菜单，这里手动刷新勾选态
+            logging_error!(Type::Tray, Tray::global().update_menu().await);
+        }
+        MenuIds::CLOSE_ALL_CONNECTIONS => {
+            if let Err(err) = handle::Handle::mihomo().close_all_connections().await {
+                logging!(error, Type::Tray, "Failed to close all connections from tray: {err}");
+            }
+        }
+        MenuIds::COPY_ENV => feat::copy_clash_env().await,
+        MenuIds::CONF_DIR => {
+            let _ = cmd::open_app_dir().await;
+        }
+        MenuIds::CORE_DIR => {
+            let _ = cmd::open_core_dir().await;
+        }
+        MenuIds::LOGS_DIR => {
+            let _ = cmd::open_logs_dir().await;
+        }
+        MenuIds::APP_LOG => {
+            let _ = help::open_app_latest_log();
+        }
+        MenuIds::CORE_LOG => {
+            let _ = help::open_core_latest_log().await;
+        }
+        MenuIds::RESTART_CLASH => feat::restart_clash_core().await,
+        MenuIds::RESTART_APP => feat::restart_app().await,
+        MenuIds::LIGHTWEIGHT_MODE => {
+            if !is_in_lightweight_mode() {
+                lightweight::entry_lightweight_mode().await;
+            } else {
+                lightweight::exit_lightweight_mode().await;
+            }
+        }
+        MenuIds::EXIT => {
+            feat::quit().await;
+        }
+        id if id.starts_with("profiles_") => {
+            let profile_index = match id.strip_prefix("profiles_") {
+                Some(index_str) => index_str,
+                None => return,
+            };
+            feat::toggle_proxy_profile(profile_index.into()).await;
+        }
+        id if id.starts_with(MenuIds::TEST_LATENCY) => {
+            let group_name = id
+                .strip_prefix(MenuIds::TEST_LATENCY)
+                .and_then(|rest| rest.strip_prefix('_'));
+            if let Some(group_name) = group_name {
+                logging!(info, Type::Tray, "Tray menu: test group latency {}", group_name);
+                latency::test_proxy_group_delay(group_name).await;
+            }
+        }
+        id if id.starts_with("proxy_") => {
+            let rest = match id.strip_prefix("proxy_") {
+                Some(r) => r,
+                None => return,
+            };
+            let (group_name, proxy_name) = match rest.split_once('_') {
+                Some((g, p)) => (g, p),
+                None => return,
+            };
+            feat::switch_proxy_node(group_name, proxy_name).await;
+        }
+        _ => {
+            logging!(debug, Type::Tray, "Unhandled tray menu event: {}", id);
+        }
+    }
 }

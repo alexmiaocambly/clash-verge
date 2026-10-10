@@ -74,6 +74,7 @@ tray:
   testingLatency: 正在测试延迟…
   systemProxy: 系统代理
   tunMode: TUN 模式
+  traySpeed: 显示实时速率
   closeAllConnections: 关闭所有连接
   lightweightMode: 轻量模式
   copyEnv: 复制环境变量

@@ -74,6 +74,7 @@ tray:
   testingLatency: 遅延をテスト中…
   systemProxy: システムプロキシ
   tunMode: TUN モード
+  traySpeed: 通信速度を表示
   closeAllConnections: すべての接続を閉じる
   lightweightMode: 軽量モード
   copyEnv: 環境変数をコピー

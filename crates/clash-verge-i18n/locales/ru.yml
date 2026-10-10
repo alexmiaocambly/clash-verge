@@ -74,6 +74,7 @@ tray:
   testingLatency: Проверка задержки…
   systemProxy: Системный прокси
   tunMode: Режим TUN
+  traySpeed: Показывать скорость сети
   closeAllConnections: Закрыть все соединения
   lightweightMode: Легкий режим
   copyEnv: Копировать переменные среды

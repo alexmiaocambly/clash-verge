@@ -74,6 +74,7 @@ tray:
   testingLatency: Probando latencia…
   systemProxy: Proxy del sistema
   tunMode: Modo TUN
+  traySpeed: Mostrar velocidad de red
   closeAllConnections: Cerrar todas las conexiones
   lightweightMode: Modo ligero
   copyEnv: Copiar variables de entorno
