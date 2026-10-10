@@ -3,6 +3,8 @@ use std::borrow::Cow;
 
 macro_rules! define_menu {
     ($($field:ident => $const_name:ident, $id:expr, $text:expr),+ $(,)?) => {
+        // 部分文案仅 macOS 原生菜单使用
+        #[allow(dead_code)]
         #[derive(Debug)]
         pub struct MenuTexts {
             $(pub $field: Cow<'static, str>,)+
