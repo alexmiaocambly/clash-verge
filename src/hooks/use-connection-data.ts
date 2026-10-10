@@ -10,38 +10,34 @@ type ConnectionListener = () => void
 
 const metadataValue = (value?: string) => value || ''
 
-export const initConnData: ConnectionMonitorData = {
+const initConnData: ConnectionMonitorData = {
   uploadTotal: 0,
   downloadTotal: 0,
   activeConnections: [],
   closedConnections: [],
 }
 
-export interface ConnectionMonitorData {
+interface ConnectionMonitorData {
   uploadTotal: number
   downloadTotal: number
   activeConnections: IConnectionsItem[]
   closedConnections: IConnectionsItem[]
 }
 
-export interface ConnectionSummaryData {
-  uploadTotal: number
-  downloadTotal: number
+interface ConnectionSummaryPayload {
+  count?: number
+}
+
+interface ConnectionSummaryData {
   activeConnectionCount: number
 }
 
-export const initConnSummaryData: ConnectionSummaryData = {
-  uploadTotal: 0,
-  downloadTotal: 0,
+const initConnSummaryData: ConnectionSummaryData = {
   activeConnectionCount: 0,
 }
 
 let connectionData: ConnectionMonitorData = initConnData
 let connectionSummary: ConnectionSummaryData = initConnSummaryData
-let connectionSocket: MihomoWebSocket | null = null
-let connectionStarted = false
-let connectionConnecting = false
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 let pendingMessageData: string | null = null
 let lastFlushAt = 0
@@ -210,18 +206,16 @@ const mergeConnectionSnapshot = (
 }
 
 const mergeConnectionSummary = (
-  payload: IConnections,
+  payload: ConnectionSummaryPayload,
 ): ConnectionSummaryData => ({
-  uploadTotal: payload.uploadTotal ?? 0,
-  downloadTotal: payload.downloadTotal ?? 0,
-  activeConnectionCount: payload.connections?.length ?? 0,
+  activeConnectionCount: payload.count ?? 0,
 })
 
 const flushPendingMessage = () => {
   flushTimer = null
   const messageData = pendingMessageData
   pendingMessageData = null
-  if (!messageData) return
+  if (!messageData || connectionListeners.size === 0) return
 
   let payload: IConnections
   try {
@@ -232,10 +226,6 @@ const flushPendingMessage = () => {
   }
 
   lastFlushAt = Date.now()
-  connectionSummary = mergeConnectionSummary(payload)
-  notifySummaryListeners()
-
-  if (connectionListeners.size === 0) return
 
   connectionData = mergeConnectionSnapshot(payload, connectionData)
   notifyConnectionListeners()
@@ -257,95 +247,160 @@ const enqueueConnectionMessage = (messageData: string) => {
   )
 }
 
-const clearReconnectTimer = () => {
-  if (!reconnectTimer) return
-  window.clearTimeout(reconnectTimer)
-  reconnectTimer = null
-}
-
-const closeConnectionSocket = async () => {
-  const socket = connectionSocket
-  connectionSocket = null
-  if (!socket) return
-
-  try {
-    await socket.close()
-  } catch (err) {
-    console.warn('Failed to close connection websocket', err)
-  }
-}
-
-const scheduleReconnect = () => {
-  if (reconnectTimer) return
-  reconnectTimer = window.setTimeout(() => {
-    reconnectTimer = null
-    void connectConnectionSocket()
-  }, CONNECTION_RECONNECT_DELAY_MS)
-}
-
-async function reconnectConnectionSocket() {
-  await closeConnectionSocket()
-  scheduleReconnect()
-}
-
-async function connectConnectionSocket() {
-  if (connectionSocket || connectionConnecting) return
-
-  clearReconnectTimer()
-  connectionConnecting = true
-
-  try {
-    const socket = await MihomoWebSocket.connect_connections()
-    connectionSocket = socket
-    socket.addListener((message) => {
-      if (message.type !== 'Text') return
-      if (message.data.startsWith('Websocket error')) {
-        void reconnectConnectionSocket()
-        return
-      }
-
-      enqueueConnectionMessage(message.data)
-    })
-  } catch {
-    scheduleReconnect()
-  } finally {
-    connectionConnecting = false
-  }
-}
-
-const startConnectionMonitor = () => {
-  if (connectionStarted) return
-  connectionStarted = true
-  void connectConnectionSocket()
-}
-
-const getConnectionSnapshot = () => connectionData
-const getConnectionSummarySnapshot = () => connectionSummary
-
-const subscribeConnectionData = (listener: ConnectionListener) => {
-  startConnectionMonitor()
-  connectionListeners.add(listener)
-  return () => {
-    connectionListeners.delete(listener)
-  }
-}
-
-const subscribeConnectionSummary = (listener: ConnectionListener) => {
-  startConnectionMonitor()
-  summaryListeners.add(listener)
-  return () => {
-    summaryListeners.delete(listener)
-  }
-}
-
-const refreshConnectionData = () => {
+const clearPendingMessage = () => {
   pendingMessageData = null
   if (flushTimer) {
     window.clearTimeout(flushTimer)
     flushTimer = null
   }
+}
 
-  void reconnectConnectionSocket()
+interface SocketSupervisor {
+  start: () => void
+  stopIfIdle: () => void
+}
+
+const createSocketSupervisor = (options: {
+  listeners: Set<ConnectionListener>
+  connectSocket: () => Promise<MihomoWebSocket>
+  onText: (data: string) => void
+  closeLogLabel: string
+  onIdle?: () => void
+}): SocketSupervisor => {
+  const { listeners, connectSocket, onText, closeLogLabel, onIdle } = options
+  const hasSubscribers = () => listeners.size > 0
+  let socket: MihomoWebSocket | null = null
+  let connecting = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+  const clearReconnectTimer = () => {
+    if (!reconnectTimer) return
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+
+  const closeSocket = async () => {
+    const current = socket
+    socket = null
+    if (!current) return
+
+    try {
+      await current.close()
+    } catch (err) {
+      console.warn(`Failed to close ${closeLogLabel} websocket`, err)
+    }
+  }
+
+  const scheduleReconnect = () => {
+    if (!hasSubscribers()) return
+    if (reconnectTimer) return
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null
+      void connect()
+    }, CONNECTION_RECONNECT_DELAY_MS)
+  }
+
+  const reconnect = async () => {
+    if (!hasSubscribers()) return
+    await closeSocket()
+    scheduleReconnect()
+  }
+
+  const connect = async () => {
+    if (socket || connecting) return
+    if (!hasSubscribers()) return
+
+    clearReconnectTimer()
+    connecting = true
+
+    try {
+      const connected = await connectSocket()
+      if (!hasSubscribers()) {
+        await connected.close()
+        return
+      }
+      socket = connected
+      connected.addListener((message) => {
+        if (socket !== connected) return
+        if (message.type !== 'Text') return
+        if (message.data.startsWith('Websocket error')) {
+          void reconnect()
+          return
+        }
+
+        onText(message.data)
+      })
+    } catch {
+      scheduleReconnect()
+    } finally {
+      connecting = false
+    }
+  }
+
+  return {
+    start: () => {
+      void connect()
+    },
+    stopIfIdle: () => {
+      if (hasSubscribers()) return
+
+      onIdle?.()
+      clearReconnectTimer()
+      void closeSocket()
+    },
+  }
+}
+
+const handleSummaryText = (messageData: string) => {
+  let payload: ConnectionSummaryPayload
+  try {
+    payload = JSON.parse(messageData) as ConnectionSummaryPayload
+  } catch (err) {
+    console.error(
+      '[Connections] Failed to parse connections count payload',
+      err,
+    )
+    return
+  }
+
+  connectionSummary = mergeConnectionSummary(payload)
+  notifySummaryListeners()
+}
+
+const connectionSupervisor = createSocketSupervisor({
+  listeners: connectionListeners,
+  connectSocket: () => MihomoWebSocket.connect_connections(),
+  onText: enqueueConnectionMessage,
+  closeLogLabel: 'connection',
+  onIdle: clearPendingMessage,
+})
+
+const summarySupervisor = createSocketSupervisor({
+  listeners: summaryListeners,
+  connectSocket: () => MihomoWebSocket.connect_connections_count(),
+  onText: handleSummaryText,
+  closeLogLabel: 'connections count',
+})
+
+const getConnectionSnapshot = () => connectionData
+const getConnectionSummarySnapshot = () => connectionSummary
+
+const subscribeConnectionData = (listener: ConnectionListener) => {
+  connectionListeners.add(listener)
+  connectionSupervisor.start()
+  return () => {
+    connectionListeners.delete(listener)
+    connectionSupervisor.stopIfIdle()
+  }
+}
+
+const subscribeConnectionSummary = (listener: ConnectionListener) => {
+  summaryListeners.add(listener)
+  summarySupervisor.start()
+  return () => {
+    summaryListeners.delete(listener)
+    summarySupervisor.stopIfIdle()
+  }
 }
 
 const clearClosedConnectionData = () => {
@@ -357,40 +412,44 @@ const clearClosedConnectionData = () => {
   notifyConnectionListeners()
 }
 
-export const useConnectionData = () => {
+export const useConnectionData = (options?: { enabled?: boolean }) => {
+  const enabled = options?.enabled ?? true
+  const subscribe = useCallback(
+    (listener: ConnectionListener) =>
+      enabled ? subscribeConnectionData(listener) : () => {},
+    [enabled],
+  )
   const data = useSyncExternalStore(
-    subscribeConnectionData,
+    subscribe,
     getConnectionSnapshot,
     getConnectionSnapshot,
   )
   const response = useMemo(() => ({ data }), [data])
-  const refreshGetClashConnection = useCallback(() => {
-    refreshConnectionData()
-  }, [])
   const clearClosedConnections = useCallback(() => {
     clearClosedConnectionData()
   }, [])
 
   return {
     response,
-    refreshGetClashConnection,
     clearClosedConnections,
   }
 }
 
-export const useConnectionSummaryData = () => {
+export const useConnectionSummaryData = (options?: { enabled?: boolean }) => {
+  const enabled = options?.enabled ?? true
+  const subscribe = useCallback(
+    (listener: ConnectionListener) =>
+      enabled ? subscribeConnectionSummary(listener) : () => {},
+    [enabled],
+  )
   const data = useSyncExternalStore(
-    subscribeConnectionSummary,
+    subscribe,
     getConnectionSummarySnapshot,
     getConnectionSummarySnapshot,
   )
   const response = useMemo(() => ({ data }), [data])
-  const refreshGetClashConnectionSummary = useCallback(() => {
-    refreshConnectionData()
-  }, [])
 
   return {
     response,
-    refreshGetClashConnectionSummary,
   }
 }

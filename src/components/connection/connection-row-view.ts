@@ -35,7 +35,7 @@ export const formatConnectionTraffic = (value?: number) => {
       ? 0
       : Math.min(Math.floor(Math.log2(value) / 10), TRAFFIC_UNITS.length - 1)
   const data = value / 1024 ** exp
-  const text = data >= 1000 ? data.toFixed(0) : data.toPrecision(3)
+  const text = Math.round(data) >= 1000 ? data.toFixed(0) : data.toPrecision(3)
   return `${text} ${TRAFFIC_UNITS[exp]}`
 }
 
@@ -57,9 +57,9 @@ export const getConnectionDestination = (connection: IConnectionsItem) => {
 
 export const getConnectionHost = (connection: IConnectionsItem) => {
   const { metadata } = connection
-  return metadata.host
-    ? `${metadata.host}:${metadata.destinationPort}`
-    : `${metadata.remoteDestination}:${metadata.destinationPort}`
+  const host =
+    metadata.host || metadata.destinationIP || metadata.remoteDestination
+  return `${host}:${metadata.destinationPort}`
 }
 
 export const getConnectionProcess = (connection: IConnectionsItem) => {

@@ -3,12 +3,10 @@ import { Box, Button, ButtonGroup } from '@mui/material'
 import { useLockFn } from 'ahooks'
 import { useCallback, useEffect, useReducer, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { closeAllConnections } from 'tauri-plugin-mihomo-api'
 
 import { BasePage, TooltipIcon } from '@/components/base'
 import { ProviderButton } from '@/components/proxy/provider-button'
 import { ProxyGroups } from '@/components/proxy/proxy-groups'
-import { useVerge } from '@/hooks/use-verge'
 import {
   useAppRefreshers,
   useClashConfigData,
@@ -18,6 +16,8 @@ import {
   patchClashMode,
   updateProxyChainConfigInRuntime,
 } from '@/services/cmds'
+import { mutate } from '@/services/mutate'
+import { showNotice } from '@/services/notice-service'
 import { debugLog } from '@/utils/debug'
 
 const MODES = ['rule', 'global', 'direct'] as const
@@ -50,19 +50,22 @@ const ProxyPage = () => {
   const updateChainConfigData = useCallback((value: string | null) => {
     dispatchChainConfigData(value)
   }, [])
-  const { verge } = useVerge()
 
   const normalizedMode = clashConfig?.mode?.toLowerCase()
   const curMode = isMode(normalizedMode) ? normalizedMode : undefined
   const chainWarning = t('proxies.page.chain.warning')
 
   const onChangeMode = useLockFn(async (mode: Mode) => {
-    // 断开连接
-    if (mode !== curMode && verge?.auto_close_connection) {
-      closeAllConnections()
+    try {
+      // patchClashMode 在后端 PATCH 失败时会 reject，需提示用户而非静默失败
+      await mutate(() => patchClashMode(mode), {
+        id: 'patch-clash-mode',
+        errorNotice: false,
+      })
+      refreshClashConfig()
+    } catch (error) {
+      showNotice.error(error)
     }
-    await patchClashMode(mode)
-    refreshClashConfig()
   })
 
   const onToggleChainMode = useLockFn(async () => {
@@ -76,7 +79,10 @@ const ProxyPage = () => {
       // 退出链式代理模式时，清除链式代理配置
       try {
         debugLog('Exiting chain mode, clearing chain configuration')
-        await updateProxyChainConfigInRuntime(null)
+        await mutate(() => updateProxyChainConfigInRuntime(null), {
+          id: 'update-proxy-chain-runtime',
+          errorNotice: false,
+        })
         debugLog('Chain configuration cleared successfully')
       } catch (error) {
         console.error('Failed to clear chain configuration:', error)
@@ -133,7 +139,7 @@ const ProxyPage = () => {
   return (
     <BasePage
       full
-      contentStyle={{ height: '101.5%' }}
+      contentStyle={{ height: '100%' }}
       title={
         isChainMode ? (
           <Box
